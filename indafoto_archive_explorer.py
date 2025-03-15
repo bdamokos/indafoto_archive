@@ -289,7 +289,7 @@ def serve_image(image_path):
 @app.route('/author/<path:author_name>')
 def author_gallery(author_name):
     """View gallery of a specific author."""
-    return browse_images(author=author_name)
+    return redirect(url_for('browse_images', author=author_name))
 
 @app.route('/collection/<int:collection_id>')
 def collection_gallery(collection_id):
@@ -501,6 +501,14 @@ def create_app():
     
     # Initialize the database
     init_db()
+    
+    # Add template context processors
+    @app.context_processor
+    def utility_processor():
+        return {
+            'max': max,
+            'min': min
+        }
     
     return app
 
