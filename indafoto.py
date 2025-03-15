@@ -919,18 +919,34 @@ def crawl_images(start_offset=0, enable_archive=False, retry_mode=False):
         logger.info("Crawler finished, database connection closed")
 
 def test_album_extraction():
-    """Test function to verify album extraction from a specific page."""
-    url = "https://indafoto.hu/vasvarvar/image/27344784-e761530c/815586"
-    metadata = extract_metadata(url)
-    if metadata:
+    """Test function to verify album and collection extraction from specific pages."""
+    # Test case 1: Page with only albums
+    url1 = "https://indafoto.hu/vasvarvar/image/27344784-e761530c/815586"
+    print("\nTesting URL 1 (albums only):", url1)
+    metadata1 = extract_metadata(url1)
+    if metadata1:
         print("\nCollections:")
-        for collection in metadata['collections']:
+        for collection in metadata1['collections']:
             print(f"- {collection['title']} (ID: {collection['id']})")
         print("\nAlbums:")
-        for album in metadata['albums']:
+        for album in metadata1['albums']:
             print(f"- {album['title']} (ID: {album['id']})")
     else:
-        print("Failed to extract metadata")
+        print("Failed to extract metadata from URL 1")
+
+    # Test case 2: Page with both albums and collections
+    url2 = "https://indafoto.hu/jani58/image/27055949-52959d03"
+    print("\nTesting URL 2 (albums and collections):", url2)
+    metadata2 = extract_metadata(url2)
+    if metadata2:
+        print("\nCollections:")
+        for collection in metadata2['collections']:
+            print(f"- {collection['title']} (ID: {collection['id']})")
+        print("\nAlbums:")
+        for album in metadata2['albums']:
+            print(f"- {album['title']} (ID: {album['id']})")
+    else:
+        print("Failed to extract metadata from URL 2")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Indafoto Crawler')
