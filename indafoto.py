@@ -13,6 +13,8 @@ import queue
 import argparse
 import random
 import hashlib
+import shutil
+from pathlib import Path
 
 # Configure logging
 logging.basicConfig(
@@ -849,16 +851,45 @@ def process_image_list(image_data_list, conn, cursor, archive_queue=None, attemp
             
     return success
 
+def get_free_space_gb(path):
+    """Return free space in GB for the given path."""
+    stats = shutil.disk_usage(path)
+    return stats.free / (2**30)  # Convert bytes to GB
+
+def check_disk_space(path, min_space_gb=2):
+    """Check if there's enough disk space available."""
+    free_space_gb = get_free_space_gb(path)
+    if free_space_gb < min_space_gb:
+        raise RuntimeError(f"Not enough disk space. Only {free_space_gb:.2f}GB available, minimum required is {min_space_gb}GB")
+    return free_space_gb
+
+def estimate_space_requirements(downloaded_bytes, pages_processed, total_pages):
+    """Estimate total space requirements based on current usage."""
+    if pages_processed == 0:
+        return 0
+    
+    avg_bytes_per_page = downloaded_bytes / pages_processed
+    remaining_pages = total_pages - pages_processed
+    estimated_remaining_bytes = avg_bytes_per_page * remaining_pages
+    
+    return {
+        'avg_mb_per_page': avg_bytes_per_page / (2**20),  # Convert to MB
+        'estimated_remaining_gb': estimated_remaining_bytes / (2**30),  # Convert to GB
+        'total_estimated_gb': (downloaded_bytes + estimated_remaining_bytes) / (2**30)
+    }
+
 def crawl_images(start_offset=0, enable_archive=False, retry_mode=False):
     """Main function to crawl images and save metadata."""
     conn = init_db()
     cursor = conn.cursor()
     
-    # Handle retry mode
-    if retry_mode:
-        retry_failed_pages(conn, cursor)
-        conn.close()
-        return
+    # Check initial disk space
+    free_space_gb = check_disk_space(BASE_DIR)
+    logger.info(f"Initial free space: {free_space_gb:.2f}GB")
+    
+    # Initialize space tracking
+    total_downloaded_bytes = 0
+    pages_processed = 0
     
     # Initialize archive submission queue and worker if enabled
     archive_queue = None
@@ -871,6 +902,11 @@ def crawl_images(start_offset=0, enable_archive=False, retry_mode=False):
     try:
         for page in tqdm(range(start_offset, TOTAL_PAGES), desc="Crawling pages"):
             try:
+                # Check disk space before each page
+                free_space_gb = get_free_space_gb(BASE_DIR)
+                if free_space_gb < 2:
+                    raise RuntimeError(f"Critical: Only {free_space_gb:.2f}GB space remaining. Stopping crawler.")
+                
                 search_page_url = SEARCH_URL_TEMPLATE.format(page)
                 
                 # Skip if we've already successfully processed this page
@@ -880,6 +916,9 @@ def crawl_images(start_offset=0, enable_archive=False, retry_mode=False):
                 """, (page,))
                 if cursor.fetchone():
                     continue
+                
+                # Track page size before downloading
+                page_size_before = sum(f.stat().st_size for f in Path(BASE_DIR).rglob('*') if f.is_file())
                 
                 image_data_list = get_image_links(search_page_url, attempt=1)
                 
@@ -892,8 +931,36 @@ def crawl_images(start_offset=0, enable_archive=False, retry_mode=False):
                     """, (page, search_page_url, datetime.now().isoformat()))
                     conn.commit()
                 
+                # Calculate space used by this page
+                page_size_after = sum(f.stat().st_size for f in Path(BASE_DIR).rglob('*') if f.is_file())
+                page_downloaded_bytes = page_size_after - page_size_before
+                total_downloaded_bytes += page_downloaded_bytes
+                pages_processed += 1
+                
+                # Estimate space requirements
+                if pages_processed % 10 == 0:  # Check every 10 pages
+                    estimates = estimate_space_requirements(total_downloaded_bytes, pages_processed, TOTAL_PAGES)
+                    logger.info(
+                        f"Space usage estimates:\n"
+                        f"  Average per page: {estimates['avg_mb_per_page']:.2f}MB\n"
+                        f"  Estimated remaining: {estimates['estimated_remaining_gb']:.2f}GB\n"
+                        f"  Total estimated: {estimates['total_estimated_gb']:.2f}GB\n"
+                        f"  Current free space: {free_space_gb:.2f}GB"
+                    )
+                    
+                    # Warn if estimated space requirement exceeds 80% of available space
+                    if estimates['estimated_remaining_gb'] > free_space_gb * 0.8:
+                        logger.warning(
+                            f"Warning: Estimated remaining space requirement "
+                            f"({estimates['estimated_remaining_gb']:.2f}GB) "
+                            f"is more than 80% of available space ({free_space_gb:.2f}GB)"
+                        )
+                
                 time.sleep(BASE_RATE_LIMIT)
 
+            except RuntimeError as e:
+                logger.critical(str(e))
+                break
             except Exception as e:
                 logger.error(f"Error processing page {page}: {e}")
                 # Record the failed page
