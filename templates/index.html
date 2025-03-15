@@ -1,104 +1,93 @@
 {% extends "base.html" %}
 
-{% block title %}Indafoto Archive Explorer - Home{% endblock %}
+{% block title %}Indafoto Archive Explorer{% endblock %}
 
 {% block content %}
-<div class="row mb-4">
-    <div class="col">
-        <h1 class="display-4">Welcome to Indafoto Archive Explorer</h1>
-        <p class="lead">Browse and explore the preserved images from Indafoto.hu</p>
-    </div>
-</div>
-
-<div class="row mb-4">
-    <div class="col-md-4 mb-3">
-        <div class="card stats-card h-100">
-            <div class="card-body text-center">
-                <h5 class="card-title">Images</h5>
-                <p class="display-4">{{ stats.total_images }}</p>
-                <a href="/images" class="btn btn-primary">Browse All</a>
+<div class="container mt-4">
+    <h1>Indafoto Archive Explorer</h1>
+    
+    <!-- Main navigation cards -->
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Browse Images</h5>
+                    <p class="card-text">Browse all {{ stats.total_images }} archived images</p>
+                    <a href="{{ url_for('browse_images') }}" class="btn btn-primary">Browse Images</a>
+                </div>
             </div>
         </div>
-    </div>
-    <div class="col-md-4 mb-3">
-        <div class="card stats-card h-100">
-            <div class="card-body text-center">
-                <h5 class="card-title">Authors</h5>
-                <p class="display-4">{{ stats.total_authors }}</p>
-                <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#authorsModal">View Top Authors</button>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Browse Collections</h5>
+                    <p class="card-text">Browse all {{ stats.total_collections }} archived collections</p>
+                    <a href="{{ url_for('browse_collections') }}" class="btn btn-primary">Browse Collections</a>
+                </div>
             </div>
         </div>
-    </div>
-    <div class="col-md-4 mb-3">
-        <div class="card stats-card h-100">
-            <div class="card-body text-center">
-                <h5 class="card-title">Tags</h5>
-                <p class="display-4">{{ stats.total_tags }}</p>
-                <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#tagsModal">View Popular Tags</button>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Browse Albums</h5>
+                    <p class="card-text">Browse all {{ stats.total_albums }} archived albums</p>
+                    <a href="{{ url_for('browse_albums') }}" class="btn btn-primary">Browse Albums</a>
+                </div>
             </div>
         </div>
-    </div>
-</div>
-
-<div class="row mb-4">
-    <div class="col-md-6 mb-3">
-        <div class="card stats-card h-100">
-            <div class="card-body text-center">
-                <h5 class="card-title">Collections</h5>
-                <p class="display-4">{{ stats.total_collections }}</p>
-                <a href="/images?collection=true" class="btn btn-primary">Browse Collections</a>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Browse Tags</h5>
+                    <p class="card-text">Browse all {{ stats.total_tags }} archived tags</p>
+                    <a href="{{ url_for('browse_tags') }}" class="btn btn-primary">Browse Tags</a>
+                </div>
             </div>
         </div>
-    </div>
-    <div class="col-md-6 mb-3">
-        <div class="card stats-card h-100">
-            <div class="card-body text-center">
-                <h5 class="card-title">Albums</h5>
-                <p class="display-4">{{ stats.total_albums }}</p>
-                <a href="/images?album=true" class="btn btn-primary">Browse Albums</a>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- Authors Modal -->
-<div class="modal fade" id="authorsModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Top Authors</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <div class="list-group">
-                    {% for author in stats.top_authors %}
-                    <a href="/author/{{ author.author }}" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
-                        {{ author.author }}
-                        <span class="badge bg-primary rounded-pill">{{ author.image_count }}</span>
-                    </a>
-                    {% endfor %}
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Marked Images</h5>
+                    <p class="card-text">View your marked images</p>
+                    <a href="{{ url_for('marked_gallery') }}" class="btn btn-primary">View Marked</a>
                 </div>
             </div>
         </div>
     </div>
-</div>
 
-<!-- Tags Modal -->
-<div class="modal fade" id="tagsModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Popular Tags</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+    <!-- Statistics -->
+    <div class="row">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Most Active Authors</h5>
+                    <ul class="list-group list-group-flush">
+                        {% for author in stats.top_authors %}
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            <a href="{{ url_for('browse_images', author=author.author) }}" class="text-decoration-none">
+                                {{ author.author }}
+                            </a>
+                            <span class="badge bg-primary rounded-pill">{{ author.image_count }}</span>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </div>
             </div>
-            <div class="modal-body">
-                <div class="list-group">
-                    {% for tag in stats.top_tags %}
-                    <a href="/tag/{{ tag.name }}" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
-                        {{ tag.name }}
-                        <span class="badge bg-primary rounded-pill">{{ tag.usage_count }}</span>
-                    </a>
-                    {% endfor %}
+        </div>
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Most Used Tags</h5>
+                    <ul class="list-group list-group-flush">
+                        {% for tag in stats.top_tags %}
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            <a href="{{ url_for('tag_detail', tag_name=tag.name) }}" class="text-decoration-none">
+                                {{ tag.name }}
+                            </a>
+                            <span class="badge bg-primary rounded-pill">{{ tag.usage_count }}</span>
+                        </li>
+                        {% endfor %}
+                    </ul>
                 </div>
             </div>
         </div>
