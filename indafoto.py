@@ -78,15 +78,17 @@ conn.commit()
 
 def get_image_directory(author):
     """Create and return a directory path for saving images."""
-    # Create author directory
+    # Create author directory with sanitized name
     author_dir = os.path.join(BASE_DIR, re.sub(r'[<>:"/\\|?*]', '_', author))
     os.makedirs(author_dir, exist_ok=True)
     
-    # Count existing files in author directory
-    existing_files = len([f for f in os.listdir(author_dir) if os.path.isfile(os.path.join(author_dir, f))])
-    subdir_num = existing_files // FILES_PER_DIR
+    # Count existing files in author directory and subdirectories
+    total_files = 0
+    for _, _, files in os.walk(author_dir):
+        total_files += len(files)
     
-    # Create numbered subdirectory
+    # Create new subdirectory based on total files
+    subdir_num = total_files // FILES_PER_DIR
     subdir = os.path.join(author_dir, str(subdir_num))
     os.makedirs(subdir, exist_ok=True)
     
@@ -154,37 +156,78 @@ def get_image_links(search_page_url):
         logger.error(f"Unexpected error while processing {search_page_url}: {e}")
         return []
 
+def parse_hungarian_date(date_str):
+    """Parse a date string in Hungarian format."""
+    if not date_str:
+        return None
+        
+    # Hungarian month mappings
+    hu_months = {
+        'jan.': '01', 'febr.': '02', 'márc.': '03', 'ápr.': '04',
+        'máj.': '05', 'jún.': '06', 'júl.': '07', 'aug.': '08',
+        'szept.': '09', 'okt.': '10', 'nov.': '11', 'dec.': '12'
+    }
+    
+    try:
+        # Split the date string
+        parts = date_str.strip().split('. ')
+        if len(parts) >= 3:
+            year = parts[0]
+            month = parts[1].lower()
+            day = parts[2].rstrip('.')
+            
+            # Convert month name to number
+            month_num = hu_months.get(month)
+            if month_num:
+                return f"{year}-{month_num}-{day.zfill(2)}"
+    except Exception as e:
+        logger.warning(f"Failed to parse Hungarian date '{date_str}': {e}")
+    return None
+
 def extract_metadata(photo_page_url):
     """Extract metadata from a photo page."""
     try:
         response = requests.get(photo_page_url, headers=HEADERS, cookies=COOKIES, timeout=10)
         if not response.ok:
             logger.error(f"Failed to fetch metadata from {photo_page_url}: HTTP {response.status_code}")
-            return {
-                'title': "Unknown",
-                'description': "No description",
-                'author': "Unknown",
-                'license': "Unknown",
-                'camera_make': None,
-                'camera_model': None,
-                'focal_length': None,
-                'aperture': None,
-                'shutter_speed': None,
-                'taken_date': None,
-                'gallery_name': None,
-                'gallery_url': None,
-                'upload_date': None,
-                'high_res_url': None
-            }
+            return None
 
         soup = BeautifulSoup(response.text, "html.parser")
         
-        # Extract basic metadata
-        title = soup.find("meta", property="og:title")
-        description = soup.find("meta", property="og:description")
-        author = soup.find("span", class_="photo-author")
-        license_info = soup.find("span", class_="photo-license")
-        
+        # Extract title - look for the h1 tag first, then fallback to meta
+        title = soup.find("h1")
+        if title:
+            title = title.text.strip()
+        else:
+            title_meta = soup.find("meta", property="og:title")
+            title = title_meta["content"] if title_meta else "Unknown"
+
+        # Extract author - look for the specific author link
+        author_elem = soup.find("a", href=lambda x: x and "/user/" in x)
+        author = author_elem.text.strip() if author_elem else "Unknown"
+
+        # Extract license information with version
+        license_info = "Unknown"
+        license_elem = soup.find("a", class_="creative-common")
+        if license_elem:
+            license_title = license_elem.get('title', '')
+            license_href = license_elem.get('href', '')
+            
+            # Extract license version from href if available
+            version_match = re.search(r'/licenses/([^/]+)/(\d+\.\d+)(?:/([A-Z]+))?', license_href)
+            if version_match:
+                license_type, version, country = version_match.groups()
+                license_info = f"CC {license_type} {version}"
+                if country:
+                    license_info += f" {country}"
+            else:
+                license_info = license_title
+
+        # Extract gallery information
+        gallery_link = soup.find('a', href=lambda x: x and '/album/' in x)
+        gallery_name = gallery_link.text.strip() if gallery_link else None
+        gallery_url = gallery_link['href'] if gallery_link else None
+
         # Extract EXIF data from the table
         exif_data = {}
         exif_table = soup.find('table')
@@ -192,41 +235,68 @@ def extract_metadata(photo_page_url):
             for row in exif_table.find_all('tr'):
                 cols = row.find_all('td')
                 if len(cols) == 2:
-                    key = cols[0].text.strip(':')
+                    key = cols[0].text.strip().rstrip(':')
                     value = cols[1].text.strip()
                     exif_data[key] = value
-        
-        # Extract gallery information
-        gallery_link = soup.find('a', href=lambda x: x and '/album/' in x)
-        gallery_name = gallery_link.text if gallery_link else None
-        gallery_url = gallery_link['href'] if gallery_link else None
-        
-        # Extract upload date
+
+        # Extract dates
         upload_date = None
+        taken_date = None
+        
+        # Try to parse upload date
         date_elem = soup.find(text=re.compile(r'\d{4}\. \w+\. \d{1,2}\.'))
         if date_elem:
-            try:
-                upload_date = datetime.strptime(date_elem.strip(), '%Y. %b. %d.').strftime('%Y-%m-%d')
-            except ValueError:
-                pass
-        
+            upload_date = parse_hungarian_date(date_elem.strip())
+            
+        # Try to parse taken date from EXIF
+        if 'Készült' in exif_data:
+            taken_date = parse_hungarian_date(exif_data['Készült'])
+
         # Find highest resolution image URL
         high_res_url = None
-        xxl_link = soup.find('a', href=lambda x: x and '_xxl.jpg' in x)
-        if xxl_link:
-            high_res_url = xxl_link['href']
+        # First look for direct image URLs
+        img_patterns = ['_xxl.jpg', '_xl.jpg', '_l.jpg', '_m.jpg']
         
+        # Try to find the image URL from meta tags first
+        og_image = soup.find("meta", property="og:image")
+        if og_image and og_image.get("content"):
+            base_url = og_image["content"]
+            # Replace the resolution suffix to get higher resolution
+            for pattern in img_patterns:
+                test_url = re.sub(r'_[a-z]+\.jpg$', pattern, base_url)
+                try:
+                    head_response = requests.head(test_url, headers=HEADERS, timeout=5)
+                    if head_response.ok:
+                        high_res_url = test_url
+                        break
+                except:
+                    continue
+        
+        # Fallback to looking for direct links if meta tag approach failed
+        if not high_res_url:
+            for pattern in img_patterns:
+                img_link = soup.find('a', href=lambda x: x and pattern in x)
+                if img_link:
+                    high_res_url = img_link['href']
+                    break
+
+        # Extract description
+        description = ""
+        desc_elem = soup.find("meta", property="og:description")
+        if desc_elem and desc_elem.get("content"):
+            description = desc_elem["content"]
+
         return {
-            'title': title["content"] if title and title.get("content") else "Unknown",
-            'description': description["content"] if description and description.get("content") else "No description",
-            'author': author.text.strip() if author else "Unknown",
-            'license': license_info.text.strip() if license_info else "Unknown",
+            'title': title,
+            'description': description,
+            'author': author,
+            'license': license_info,
             'camera_make': exif_data.get('Gyártó'),
             'camera_model': exif_data.get('Model'),
             'focal_length': exif_data.get('Fókusztáv'),
             'aperture': exif_data.get('Rekesz'),
             'shutter_speed': exif_data.get('Zársebesség'),
-            'taken_date': exif_data.get('Készült'),
+            'taken_date': taken_date,
             'gallery_name': gallery_name,
             'gallery_url': gallery_url,
             'upload_date': upload_date,
@@ -242,19 +312,38 @@ def download_image(image_url, author):
         # Get the directory for this author
         save_dir = get_image_directory(author)
         
-        # Create filename from the last part of the URL
-        filename = os.path.join(save_dir, image_url.split("/")[-1])
+        # Extract the image ID and resolution from the URL
+        url_parts = urlparse(image_url)
+        image_id = re.search(r'/(\d+)_[a-f0-9]+', url_parts.path)
+        if image_id:
+            base_name = f"image_{image_id.group(1)}"
+        else:
+            # Fallback to using the last part of the path without the resolution suffix
+            base_name = re.sub(r'_[a-z]+\.jpg$', '', os.path.basename(url_parts.path))
         
-        if os.path.exists(filename):  # Skip if already downloaded
+        # Add timestamp to ensure uniqueness
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = os.path.join(save_dir, f"{base_name}_{timestamp}.jpg")
+        
+        if os.path.exists(filename):
             logger.warning(f"Skipping download, file already exists: {filename}")
             return filename
 
         response = requests.get(image_url, headers=HEADERS, timeout=10, stream=True)
         response.raise_for_status()
         
-        with open(filename, "wb") as file:
-            for chunk in response.iter_content(1024):
+        total_size = int(response.headers.get('content-length', 0))
+        block_size = 1024
+        
+        with open(filename, "wb") as file, tqdm(
+            total=total_size,
+            unit='B',
+            unit_scale=True,
+            desc=f"Downloading {os.path.basename(filename)}"
+        ) as pbar:
+            for chunk in response.iter_content(block_size):
                 file.write(chunk)
+                pbar.update(len(chunk))
         
         logger.info(f"Successfully downloaded image to {filename}")
         return filename
