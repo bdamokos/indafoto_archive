@@ -358,18 +358,27 @@ def extract_metadata(photo_page_url):
                     
                     collection_link = li.find("a")
                     if collection_link and collection_id:
-                        collection_title_span = collection_link.find("span", class_="album_title")
-                        collection_title = collection_title_span.get_text(strip=True) if collection_title_span else ""
+                        # Try different ways to get the title
+                        collection_title = None
+                        # First try the album_title span
+                        title_span = collection_link.find("span", class_="album_title")
+                        if title_span:
+                            collection_title = title_span.get_text(strip=True)
+                        # If that fails, try getting the link text directly
+                        if not collection_title:
+                            collection_title = collection_link.get_text(strip=True)
                         
-                        if not collection_title and collection_link.string:
-                            collection_title = collection_link.string.strip()
+                        # If still no title, try looking for the text directly in the li element
+                        if not collection_title:
+                            collection_title = li.get_text(strip=True)
                         
-                        collections.append({
-                            'id': collection_id,
-                            'title': collection_title,
-                            'url': collection_link.get('href'),
-                            'is_public': 'public' in li.get('class', [])
-                        })
+                        if collection_title:
+                            collections.append({
+                                'id': collection_id,
+                                'title': collection_title,
+                                'url': collection_link.get('href'),
+                                'is_public': 'public' in li.get('class', [])
+                            })
 
         # Extract albums ("Albumokban")
         albums_section = soup.find("section", class_="collections")
@@ -385,18 +394,27 @@ def extract_metadata(photo_page_url):
                     
                     album_link = li.find("a")
                     if album_link and album_id:
-                        album_title_span = album_link.find("span", class_="album_title")
-                        album_title = album_title_span.get_text(strip=True) if album_title_span else ""
+                        # Try different ways to get the title
+                        album_title = None
+                        # First try the album_title span
+                        title_span = album_link.find("span", class_="album_title")
+                        if title_span:
+                            album_title = title_span.get_text(strip=True)
+                        # If that fails, try getting the link text directly
+                        if not album_title:
+                            album_title = album_link.get_text(strip=True)
                         
-                        if not album_title and album_link.string:
-                            album_title = album_link.string.strip()
+                        # If still no title, try looking for the text directly in the li element
+                        if not album_title:
+                            album_title = li.get_text(strip=True)
                         
-                        albums.append({
-                            'id': album_id,
-                            'title': album_title,
-                            'url': album_link.get('href'),
-                            'is_public': 'public' in li.get('class', [])
-                        })
+                        if album_title:
+                            albums.append({
+                                'id': album_id,
+                                'title': album_title,
+                                'url': album_link.get('href'),
+                                'is_public': 'public' in li.get('class', [])
+                            })
 
         # Extract tags
         tags = []
@@ -779,15 +797,34 @@ def crawl_images(start_offset=0, enable_archive=False):
         conn.close()
         logger.info("Crawler finished, database connection closed")
 
+def test_album_extraction():
+    """Test function to verify album extraction from a specific page."""
+    url = "https://indafoto.hu/vasvarvar/image/27344784-e761530c/815586"
+    metadata = extract_metadata(url)
+    if metadata:
+        print("\nCollections:")
+        for collection in metadata['collections']:
+            print(f"- {collection['title']} (ID: {collection['id']})")
+        print("\nAlbums:")
+        for album in metadata['albums']:
+            print(f"- {album['title']} (ID: {album['id']})")
+    else:
+        print("Failed to extract metadata")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Indafoto Crawler')
     parser.add_argument('--start-offset', type=int, default=0,
                        help='Page offset to start crawling from')
     parser.add_argument('--enable-archive', action='store_true',
                        help='Enable Internet Archive submissions (disabled by default)')
+    parser.add_argument('--test', action='store_true',
+                       help='Run test function instead of crawler')
     args = parser.parse_args()
     
     try:
-        crawl_images(start_offset=args.start_offset, enable_archive=args.enable_archive)
+        if args.test:
+            test_album_extraction()
+        else:
+            crawl_images(start_offset=args.start_offset, enable_archive=args.enable_archive)
     except Exception as e:
         logger.critical(f"Unexpected error occurred: {e}", exc_info=True)
