@@ -2,7 +2,7 @@
 # We should be able to recreate a view per user and per album, collection, tag
 # We should be able to mark images worth preserving and save this info to database with a reference to the image (e.g. the ID of the image)
 
-from flask import Flask, render_template, request, jsonify, send_file, abort
+from flask import Flask, render_template, request, jsonify, send_file, abort, redirect, url_for
 import sqlite3
 import os
 from datetime import datetime
@@ -352,12 +352,146 @@ def album_gallery(album_id):
 @app.route('/tag/<path:tag_name>')
 def tag_gallery(tag_name):
     """View gallery of images with a specific tag."""
-    return browse_images(tag=tag_name)
+    return redirect(url_for('browse_images', tag=tag_name))
 
 @app.route('/marked')
 def marked_gallery():
-    """View gallery of marked images."""
-    return browse_images(marked=True)
+    """View gallery of marked images with statistics and notes."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get statistics
+    stats = {}
+    
+    # Total marked images
+    cursor.execute("SELECT COUNT(*) as count FROM marked_images")
+    stats['total_marked'] = cursor.fetchone()['count']
+    
+    # Total images (for percentage calculation)
+    cursor.execute("SELECT COUNT(*) as count FROM images")
+    total_images = cursor.fetchone()['count']
+    stats['percentage_marked'] = (stats['total_marked'] / total_images * 100) if total_images > 0 else 0
+    
+    # Count of different authors
+    cursor.execute("""
+        SELECT COUNT(DISTINCT i.author) as count
+        FROM images i
+        JOIN marked_images m ON i.id = m.image_id
+    """)
+    stats['authors_count'] = cursor.fetchone()['count']
+    
+    # Count of images with notes
+    cursor.execute("SELECT COUNT(*) as count FROM marked_images WHERE note IS NOT NULL AND note != ''")
+    stats['with_notes'] = cursor.fetchone()['count']
+    
+    # Get marked images with their notes
+    cursor.execute("""
+        SELECT i.*, m.note, m.marked_date
+        FROM images i
+        JOIN marked_images m ON i.id = m.image_id
+        ORDER BY m.marked_date DESC
+    """)
+    images = cursor.fetchall()
+    
+    conn.close()
+    
+    return render_template('marked.html', images=images, stats=stats)
+
+@app.route('/tags')
+def browse_tags():
+    """View all tags with their statistics."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get all tags with both their original count and current archive count
+    cursor.execute("""
+        SELECT t.name, t.count as original_count,
+               COUNT(DISTINCT it.image_id) as archive_count
+        FROM tags t
+        LEFT JOIN image_tags it ON t.id = it.tag_id
+        GROUP BY t.id
+        ORDER BY archive_count DESC, t.count DESC
+    """)
+    
+    tags = [
+        {
+            'name': row['name'],
+            'count': row['original_count'],
+            'archive_count': row['archive_count']
+        }
+        for row in cursor.fetchall()
+    ]
+    
+    conn.close()
+    
+    return render_template('tags.html', tags=tags)
+
+@app.route('/tag/<path:tag_name>/detail')
+def tag_detail(tag_name):
+    """View detailed information about a specific tag."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get tag details
+    cursor.execute("""
+        SELECT t.name, t.count,
+               COUNT(DISTINCT it.image_id) as archive_count
+        FROM tags t
+        LEFT JOIN image_tags it ON t.id = it.tag_id
+        WHERE t.name = ?
+        GROUP BY t.id
+    """, (tag_name,))
+    tag = cursor.fetchone()
+    
+    if not tag:
+        abort(404)
+    
+    # Get related tags (tags that appear together with this tag)
+    cursor.execute("""
+        SELECT t2.name, COUNT(DISTINCT it2.image_id) as count
+        FROM tags t1
+        JOIN image_tags it1 ON t1.id = it1.tag_id
+        JOIN image_tags it2 ON it1.image_id = it2.image_id
+        JOIN tags t2 ON it2.tag_id = t2.id
+        WHERE t1.name = ? AND t2.name != ?
+        GROUP BY t2.id
+        ORDER BY count DESC
+        LIMIT 20
+    """, (tag_name, tag_name))
+    related_tags = cursor.fetchall()
+    
+    # Get top authors using this tag
+    cursor.execute("""
+        SELECT i.author as name, COUNT(DISTINCT i.id) as count
+        FROM images i
+        JOIN image_tags it ON i.id = it.image_id
+        JOIN tags t ON it.tag_id = t.id
+        WHERE t.name = ?
+        GROUP BY i.author
+        ORDER BY count DESC
+        LIMIT 10
+    """, (tag_name,))
+    top_authors = cursor.fetchall()
+    
+    # Get recent images with this tag
+    cursor.execute("""
+        SELECT i.*
+        FROM images i
+        JOIN image_tags it ON i.id = it.image_id
+        JOIN tags t ON it.tag_id = t.id
+        WHERE t.name = ?
+        ORDER BY i.id DESC
+        LIMIT 12
+    """, (tag_name,))
+    recent_images = cursor.fetchall()
+    
+    conn.close()
+    
+    return render_template('tag_detail.html',
+                         tag=tag,
+                         related_tags=related_tags,
+                         top_authors=top_authors,
+                         recent_images=recent_images)
 
 def create_app():
     """Create and configure the Flask application."""
