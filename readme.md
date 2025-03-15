@@ -2,6 +2,8 @@
 
 This tool allows you to archive photos from indafoto.hu before the service shuts down.
 
+The default setting is to save freely licensed images. Change SEARCH_URL_TEMPLATE in indafoto.py if you want to save images based on different criteria (e.g. username)
+
 ## Prerequisites
 
 - Python 3.6 or higher

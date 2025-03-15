@@ -8,6 +8,11 @@ from bs4 import BeautifulSoup
 from urllib.parse import unquote, urlparse
 import re
 from datetime import datetime
+import threading
+import queue
+import argparse
+import random
+import hashlib
 
 # Configure logging
 logging.basicConfig(
@@ -20,13 +25,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# TODO: Add intelligent resume feature, and error handling (e.g. if we find an error that prevents the middle 20% of the pages from being downloaded, we should skip them and continue from the next page, after the run we would fix the error and the script should find and download the missing images)
+
 # Configurations
+# If you want to save images with different characteristics, you can change the search URL template.
 SEARCH_URL_TEMPLATE = "https://indafoto.hu/search/list?profile=main&sphinx=1&search=advanced&textsearch=fulltext&textuser=&textmap=&textcompilation=&photo=&datefrom=&dateto=&licence%5B1%5D=I1%3BI2%3BII1%3BII2&licence%5B2%5D=I1%3BI2%3BI3&page_offset={}"
 BASE_DIR = "indafoto_archive"
 DB_FILE = "indafoto.db"
-TOTAL_PAGES = 15000
+TOTAL_PAGES = 14267
 RATE_LIMIT = 2  # seconds between requests
 FILES_PER_DIR = 1000  # Maximum number of files per directory
+ARCHIVE_SAMPLE_RATE = 0.005  # 0.5% sample rate for Internet Archive submissions
 
 HEADERS = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -52,29 +61,74 @@ COOKIES = {
 os.makedirs(BASE_DIR, exist_ok=True)
 
 # Initialize database
-conn = sqlite3.connect(DB_FILE)
-cursor = conn.cursor()
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS images (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    url TEXT UNIQUE,
-    local_path TEXT,
-    title TEXT,
-    description TEXT,
-    author TEXT,
-    license TEXT,
-    camera_make TEXT,
-    camera_model TEXT,
-    focal_length TEXT,
-    aperture TEXT,
-    shutter_speed TEXT,
-    taken_date TEXT,
-    gallery_name TEXT,
-    gallery_url TEXT,
-    upload_date TEXT
-)
-""")
-conn.commit()
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    # Create images table with UUID and hash
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS images (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT UNIQUE,
+        url TEXT UNIQUE,
+        local_path TEXT,
+        sha256_hash TEXT,
+        title TEXT,
+        author TEXT,
+        author_url TEXT,
+        license TEXT,
+        camera_make TEXT,
+        focal_length TEXT,
+        aperture TEXT,
+        shutter_speed TEXT,
+        taken_date TEXT,
+        upload_date TEXT,
+        page_url TEXT
+    )
+    """)
+    
+    # Add sha256_hash column if it doesn't exist (for backwards compatibility)
+    try:
+        cursor.execute("ALTER TABLE images ADD COLUMN sha256_hash TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    
+    # Create galleries table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS galleries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        gallery_id TEXT UNIQUE,
+        title TEXT,
+        url TEXT,
+        is_public BOOLEAN
+    )
+    """)
+    
+    # Create image_galleries junction table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS image_galleries (
+        image_id INTEGER,
+        gallery_id INTEGER,
+        FOREIGN KEY (image_id) REFERENCES images (id),
+        FOREIGN KEY (gallery_id) REFERENCES galleries (id),
+        PRIMARY KEY (image_id, gallery_id)
+    )
+    """)
+    
+    # Create archive_submissions table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS archive_submissions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        url TEXT UNIQUE,
+        submission_date TEXT,
+        type TEXT,  -- 'author_page', 'image_page', 'gallery_page'
+        status TEXT,
+        archive_url TEXT
+    )
+    """)
+    
+    conn.commit()
+    return conn
 
 def get_image_directory(author):
     """Create and return a directory path for saving images."""
@@ -194,7 +248,7 @@ def extract_metadata(photo_page_url):
 
         soup = BeautifulSoup(response.text, "html.parser")
         
-        # Extract title - look for the h1 tag first, then fallback to meta
+        # Extract title from h1 tag
         title = soup.find("h1")
         if title:
             title = title.text.strip()
@@ -202,33 +256,56 @@ def extract_metadata(photo_page_url):
             title_meta = soup.find("meta", property="og:title")
             title = title_meta["content"] if title_meta else "Unknown"
 
-        # Extract author - look for the specific author link
-        author_elem = soup.find("a", href=lambda x: x and "/user/" in x)
-        author = author_elem.text.strip() if author_elem else "Unknown"
+        # Extract author from user_name class
+        author_container = soup.find("h2", class_="user_name")
+        author = "Unknown"
+        author_url = None
+        if author_container:
+            author_link = author_container.find("a")
+            if author_link:
+                author = author_link.text.strip()
+                author_url = author_link.get('href')
 
-        # Extract license information with version
+        # Extract license information with version from cc_container
         license_info = "Unknown"
-        license_elem = soup.find("a", class_="creative-common")
-        if license_elem:
-            license_title = license_elem.get('title', '')
-            license_href = license_elem.get('href', '')
-            
-            # Extract license version from href if available
-            version_match = re.search(r'/licenses/([^/]+)/(\d+\.\d+)(?:/([A-Z]+))?', license_href)
-            if version_match:
-                license_type, version, country = version_match.groups()
-                license_info = f"CC {license_type} {version}"
-                if country:
-                    license_info += f" {country}"
-            else:
-                license_info = license_title
+        cc_container = soup.find("div", class_="cc_container")
+        if cc_container:
+            license_link = cc_container.find("a")
+            if license_link:
+                license_href = license_link.get('href', '')
+                version_match = re.search(r'/licenses/([^/]+)/(\d+\.\d+)(?:/([A-Z]+))?', license_href)
+                if version_match:
+                    license_type, version, country = version_match.groups()
+                    license_info = f"CC {license_type} {version}"
+                    if country:
+                        license_info += f" {country}"
 
-        # Extract gallery information
-        gallery_link = soup.find('a', href=lambda x: x and '/album/' in x)
-        gallery_name = gallery_link.text.strip() if gallery_link else None
-        gallery_url = gallery_link['href'] if gallery_link else None
+        # Extract galleries
+        galleries = []
+        collections_container = soup.find("ul", class_="collections_container")
+        if collections_container:
+            for li in collections_container.find_all("li", class_=lambda x: x and "collection_" in x):
+                gallery_id = None
+                for class_name in li.get('class', []):
+                    if class_name.startswith('collection_'):
+                        gallery_id = class_name.split('_')[1]
+                        break
+                
+                gallery_link = li.find("a")
+                if gallery_link and gallery_id:
+                    # Find the album title span and extract its text
+                    album_title_span = gallery_link.find("span", class_="album_title")
+                    title = album_title_span.text.strip() if album_title_span else ""
+                    
+                    galleries.append({
+                        'id': gallery_id,
+                        'title': title,
+                        'url': gallery_link.get('href'),
+                        'is_public': 'public' in li.get('class', [])
+                    })
 
         # Extract EXIF data from the table
+        
         exif_data = {}
         exif_table = soup.find('table')
         if exif_table:
@@ -244,6 +321,7 @@ def extract_metadata(photo_page_url):
         taken_date = None
         
         # Try to parse upload date
+        # TODO: Convert upload date into date format for saving in the database?
         date_elem = soup.find(text=re.compile(r'\d{4}\. \w+\. \d{1,2}\.'))
         if date_elem:
             upload_date = parse_hungarian_date(date_elem.strip())
@@ -280,30 +358,36 @@ def extract_metadata(photo_page_url):
                     high_res_url = img_link['href']
                     break
 
-        # Extract description
-        description = ""
-        desc_elem = soup.find("meta", property="og:description")
-        if desc_elem and desc_elem.get("content"):
-            description = desc_elem["content"]
-
         return {
             'title': title,
-            'description': description,
             'author': author,
+            'author_url': author_url,
             'license': license_info,
+            'galleries': galleries,
             'camera_make': exif_data.get('Gyártó'),
-            'camera_model': exif_data.get('Model'),
             'focal_length': exif_data.get('Fókusztáv'),
             'aperture': exif_data.get('Rekesz'),
             'shutter_speed': exif_data.get('Zársebesség'),
             'taken_date': taken_date,
-            'gallery_name': gallery_name,
-            'gallery_url': gallery_url,
             'upload_date': upload_date,
-            'high_res_url': high_res_url
+            'high_res_url': high_res_url,
+            'page_url': photo_page_url
         }
     except Exception as e:
         logger.error(f"Error extracting metadata from {photo_page_url}: {e}")
+        return None
+
+def calculate_file_hash(filepath):
+    """Calculate SHA-256 hash of a file."""
+    sha256_hash = hashlib.sha256()
+    try:
+        with open(filepath, "rb") as f:
+            # Read the file in chunks to handle large files efficiently
+            for byte_block in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(byte_block)
+        return sha256_hash.hexdigest()
+    except Exception as e:
+        logger.error(f"Failed to calculate hash for {filepath}: {e}")
         return None
 
 def download_image(image_url, author):
@@ -327,13 +411,17 @@ def download_image(image_url, author):
         
         if os.path.exists(filename):
             logger.warning(f"Skipping download, file already exists: {filename}")
-            return filename
+            file_hash = calculate_file_hash(filename)
+            return filename, file_hash
 
         response = requests.get(image_url, headers=HEADERS, timeout=10, stream=True)
         response.raise_for_status()
         
         total_size = int(response.headers.get('content-length', 0))
         block_size = 1024
+        
+        # Calculate hash while downloading
+        sha256_hash = hashlib.sha256()
         
         with open(filename, "wb") as file, tqdm(
             total=total_size,
@@ -343,76 +431,206 @@ def download_image(image_url, author):
         ) as pbar:
             for chunk in response.iter_content(block_size):
                 file.write(chunk)
+                sha256_hash.update(chunk)
                 pbar.update(len(chunk))
         
-        logger.info(f"Successfully downloaded image to {filename}")
-        return filename
+        file_hash = sha256_hash.hexdigest()
+        logger.info(f"Successfully downloaded image to {filename} (SHA-256: {file_hash})")
+        return filename, file_hash
     except Exception as e:
         logger.error(f"Failed to download {image_url}: {e}")
-        return None
+        return None, None
 
-def crawl_images():
-    """Main function to crawl images and save metadata."""
-    logger.info(f"Starting crawl process for {TOTAL_PAGES} pages")
-    total_downloaded = 0
-    total_skipped = 0
-    total_errors = 0
+class ArchiveSubmitter(threading.Thread):
+    def __init__(self, queue):
+        super().__init__()
+        self.queue = queue
+        self.daemon = True
 
-    for page in tqdm(range(1, TOTAL_PAGES + 1), desc="Crawling pages"):
-        search_page_url = SEARCH_URL_TEMPLATE.format(page)
-        logger.info(f"Processing page {page}/{TOTAL_PAGES}")
-        image_data_list = get_image_links(search_page_url)
+    def run(self):
+        # Create connection in the thread that will use it
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        while True:
+            try:
+                url, url_type = self.queue.get()
+                if url is None:  # Poison pill
+                    break
+                    
+                # Check if already submitted
+                cursor.execute("SELECT 1 FROM archive_submissions WHERE url = ?", (url,))
+                if cursor.fetchone():
+                    self.queue.task_done()
+                    continue
 
-        for image_data in image_data_list:
-            image_url = image_data['image_url']
-            photo_page_url = image_data['page_url']
-            
-            # Check if we've already processed this image
-            cursor.execute("SELECT 1 FROM images WHERE url=?", (image_url,))
-            if cursor.fetchone():
-                logger.debug(f"Skipping already processed image: {image_url}")
-                total_skipped += 1
+                # Submit to Internet Archive
+                try:
+                    archive_url = f"https://web.archive.org/save/{url}"
+                    response = requests.get(archive_url, timeout=30)
+                    status = "success" if response.ok else "failed"
+                    
+                    cursor.execute("""
+                        INSERT INTO archive_submissions (url, submission_date, type, status, archive_url)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (url, datetime.now().isoformat(), url_type, status, 
+                         f"https://web.archive.org/web/*/{url}" if response.ok else None))
+                    conn.commit()
+                    
+                except Exception as e:
+                    logger.error(f"Failed to submit {url} to Internet Archive: {e}")
+                    
+                self.queue.task_done()
+                time.sleep(5)  # Rate limit archive submissions
+                
+            except Exception as e:
+                logger.error(f"Error in archive submitter: {e}")
                 continue
+                
+        # Close connection when thread exits
+        conn.close()
 
-            metadata = extract_metadata(photo_page_url)
-            if not metadata:
-                total_errors += 1
-                continue
-
-            # Use high resolution URL if available
-            download_url = metadata['high_res_url'] or image_url
-            local_path = download_image(download_url, metadata['author'])
-
-            if local_path:
-                cursor.execute("""
-                    INSERT INTO images (
-                        url, local_path, title, description, author, license,
-                        camera_make, camera_model, focal_length, aperture,
-                        shutter_speed, taken_date, gallery_name, gallery_url, upload_date
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    image_url, local_path, metadata['title'], metadata['description'],
-                    metadata['author'], metadata['license'], metadata['camera_make'],
-                    metadata['camera_model'], metadata['focal_length'], metadata['aperture'],
-                    metadata['shutter_speed'], metadata['taken_date'], metadata['gallery_name'],
-                    metadata['gallery_url'], metadata['upload_date']
-                ))
-                conn.commit()
-                total_downloaded += 1
-            else:
-                total_errors += 1
-
-        logger.info(f"Page {page} completed. Progress: Downloaded: {total_downloaded}, Skipped: {total_skipped}, Errors: {total_errors}")
-        time.sleep(RATE_LIMIT)
-
-    logger.info(f"Crawl completed. Total images downloaded: {total_downloaded}, Skipped: {total_skipped}, Errors: {total_errors}")
-
-if __name__ == "__main__":
-    logger.info("Starting Indafoto crawler")
+def extract_image_id(url):
+    """Extract the unique image ID from an Indafoto URL."""
+    # The URL format is like: .../68973_42b3ac220f8b136347cfc067e6cf2b05/27113791_7f3d073a...
+    # We want the second ID (27113791)
     try:
-        crawl_images()
+        # First try to find the image ID from the URL path
+        match = re.search(r'/(\d+)_[a-f0-9]+/(\d+)_[a-f0-9]+', url)
+        if match:
+            return match.group(2)  # Return the second ID
+        
+        # Fallback: try to find any numeric ID in the URL
+        match = re.search(r'image/(\d+)-[a-f0-9]+', url)
+        if match:
+            return match.group(1)
+            
+        # If no ID found, use a hash of the URL
+        return hashlib.md5(url.encode()).hexdigest()[:12]
+    except Exception as e:
+        logger.error(f"Failed to extract image ID from URL {url}: {e}")
+        return hashlib.md5(url.encode()).hexdigest()[:12]
+
+def crawl_images(start_offset=0):
+    """Main function to crawl images and save metadata."""
+    conn = init_db()
+    cursor = conn.cursor()
+    
+    # Initialize archive submission queue and worker
+    archive_queue = queue.Queue()
+    archive_worker = ArchiveSubmitter(archive_queue)
+    archive_worker.start()
+    
+    # Track authors and their image counts for archive sampling
+    author_image_counts = {}
+    
+    try:
+        for page in tqdm(range(start_offset, TOTAL_PAGES), desc="Crawling pages"):
+            try:
+                search_page_url = SEARCH_URL_TEMPLATE.format(page)
+                image_data_list = get_image_links(search_page_url)
+
+                for image_data in image_data_list:
+                    try:
+                        image_url = image_data['image_url']
+                        photo_page_url = image_data['page_url']
+                        
+                        # Generate UUID for the image using the actual image ID
+                        image_uuid = f"indafoto_{extract_image_id(photo_page_url)}"
+                        
+                        # Check if already processed
+                        cursor.execute("SELECT 1 FROM images WHERE uuid=?", (image_uuid,))
+                        if cursor.fetchone():
+                            continue
+
+                        metadata = extract_metadata(photo_page_url)
+                        if not metadata:
+                            continue
+
+                        # Download image
+                        download_result = download_image(metadata['high_res_url'] or image_url, metadata['author'])
+                        if not download_result[0]:  # If filename is None
+                            continue
+                        
+                        local_path, file_hash = download_result
+
+                        # Insert image data
+                        cursor.execute("""
+                            INSERT INTO images (
+                                uuid, url, local_path, sha256_hash, title, author, author_url,
+                                license, camera_make, focal_length, aperture,
+                                shutter_speed, taken_date, upload_date, page_url
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            image_uuid, image_url, local_path, file_hash, metadata['title'],
+                            metadata['author'], metadata['author_url'], metadata['license'],
+                            metadata['camera_make'], metadata['focal_length'],
+                            metadata['aperture'], metadata['shutter_speed'],
+                            metadata['taken_date'], metadata['upload_date'],
+                            photo_page_url
+                        ))
+
+                        # Process galleries
+                        for gallery in metadata['galleries']:
+                            # Insert or update gallery
+                            cursor.execute("""
+                                INSERT OR IGNORE INTO galleries (gallery_id, title, url, is_public)
+                                VALUES (?, ?, ?, ?)
+                            """, (gallery['id'], gallery['title'], gallery['url'], gallery['is_public']))
+                            
+                            # Get gallery database ID
+                            cursor.execute("SELECT id FROM galleries WHERE gallery_id = ?", (gallery['id'],))
+                            gallery_db_id = cursor.fetchone()[0]
+                            
+                            # Link image to gallery
+                            cursor.execute("""
+                                INSERT INTO image_galleries (image_id, gallery_id)
+                                VALUES ((SELECT id FROM images WHERE uuid = ?), ?)
+                            """, (image_uuid, gallery_db_id))
+
+                        conn.commit()
+
+                        # Handle Internet Archive submissions
+                        author = metadata['author']
+                        author_image_counts[author] = author_image_counts.get(author, 0) + 1
+                        
+                        # Submit author page if this is their first image
+                        if author_image_counts[author] == 1 and metadata['author_url']:
+                            archive_queue.put((metadata['author_url'], 'author_page'))
+                        
+                        # Submit image page based on sampling rate
+                        if author_image_counts[author] == 1 or random.random() < ARCHIVE_SAMPLE_RATE:
+                            archive_queue.put((photo_page_url, 'image_page'))
+
+                    except Exception as e:
+                        logger.error(f"Error processing image {image_url}: {e}")
+                        continue
+
+                time.sleep(RATE_LIMIT)
+
+            except Exception as e:
+                logger.error(f"Error processing page {page}: {e}")
+                continue
+
+    except KeyboardInterrupt:
+        logger.info("Crawler interrupted by user")
     except Exception as e:
         logger.critical(f"Unexpected error occurred: {e}", exc_info=True)
     finally:
+        # Signal archive worker to stop
+        archive_queue.put((None, None))
+        archive_worker.join()
+        
         conn.close()
         logger.info("Crawler finished, database connection closed")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Indafoto Crawler')
+    parser.add_argument('--start-offset', type=int, default=0,
+                       help='Page offset to start crawling from')
+    args = parser.parse_args()
+    
+    try:
+        crawl_images(start_offset=args.start_offset)
+    except Exception as e:
+        logger.critical(f"Unexpected error occurred: {e}", exc_info=True)
