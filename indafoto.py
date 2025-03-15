@@ -92,25 +92,67 @@ def init_db():
     except sqlite3.OperationalError:
         pass  # Column already exists
     
-    # Create galleries table
+    # Create collections table
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS galleries (
+    CREATE TABLE IF NOT EXISTS collections (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        gallery_id TEXT UNIQUE,
+        collection_id TEXT UNIQUE,
         title TEXT,
         url TEXT,
         is_public BOOLEAN
     )
     """)
     
-    # Create image_galleries junction table
+    # Create albums table
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS image_galleries (
+    CREATE TABLE IF NOT EXISTS albums (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        album_id TEXT UNIQUE,
+        title TEXT,
+        url TEXT,
+        is_public BOOLEAN
+    )
+    """)
+    
+    # Create image_collections junction table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS image_collections (
         image_id INTEGER,
-        gallery_id INTEGER,
+        collection_id INTEGER,
         FOREIGN KEY (image_id) REFERENCES images (id),
-        FOREIGN KEY (gallery_id) REFERENCES galleries (id),
-        PRIMARY KEY (image_id, gallery_id)
+        FOREIGN KEY (collection_id) REFERENCES collections (id),
+        PRIMARY KEY (image_id, collection_id)
+    )
+    """)
+
+    # Create image_albums junction table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS image_albums (
+        image_id INTEGER,
+        album_id INTEGER,
+        FOREIGN KEY (image_id) REFERENCES images (id),
+        FOREIGN KEY (album_id) REFERENCES albums (id),
+        PRIMARY KEY (image_id, album_id)
+    )
+    """)
+    
+    # Create tags table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS tags (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE,
+        count INTEGER  -- number of images with this tag on indafoto
+    )
+    """)
+    
+    # Create image_tags junction table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS image_tags (
+        image_id INTEGER,
+        tag_id INTEGER,
+        FOREIGN KEY (image_id) REFERENCES images (id),
+        FOREIGN KEY (tag_id) REFERENCES tags (id),
+        PRIMARY KEY (image_id, tag_id)
     )
     """)
     
@@ -289,35 +331,87 @@ def extract_metadata(photo_page_url):
             license_link = cc_container.find("a")
             if license_link:
                 license_href = license_link.get('href', '')
-                version_match = re.search(r'/licenses/([^/]+)/(\d+\.\d+)(?:/([A-Z]+))?', license_href)
+                # Updated regex to properly capture country code from the URL path
+                version_match = re.search(r'/licenses/([^/]+)/(\d+\.\d+)(?:/([a-zA-Z]{2}))?/?$', license_href)
                 if version_match:
                     license_type, version, country = version_match.groups()
-                    license_info = f"CC {license_type} {version}"
+                    # Format as "CC TYPE VERSION COUNTRY" (e.g. "CC BY 2.5 HU")
+                    license_info = f"CC {license_type.upper()} {version}"
                     if country:
-                        license_info += f" {country}"
+                        license_info += f" {country.upper()}"
 
-        # Extract galleries
-        galleries = []
-        collections_container = soup.find("ul", class_="collections_container")
-        if collections_container:
-            for li in collections_container.find_all("li", class_=lambda x: x and "collection_" in x):
-                gallery_id = None
-                for class_name in li.get('class', []):
-                    if class_name.startswith('collection_'):
-                        gallery_id = class_name.split('_')[1]
-                        break
-                
-                gallery_link = li.find("a")
-                if gallery_link and gallery_id:
-                    # Find the album title span and extract its text
-                    album_title_span = gallery_link.find("span", class_="album_title")
-                    title = album_title_span.text.strip() if album_title_span else ""
+        # Extract collections and albums
+        collections = []
+        albums = []
+        
+        # Extract collections ("Gyűjteményekben")
+        collections_section = soup.find("section", class_="compilations")
+        if collections_section:
+            collections_container = collections_section.find("ul", class_="collections_container")
+            if collections_container:
+                for li in collections_container.find_all("li", class_=lambda x: x and "collection_" in x):
+                    collection_id = None
+                    for class_name in li.get('class', []):
+                        if class_name.startswith('collection_'):
+                            collection_id = class_name.split('_')[1]
+                            break
                     
-                    galleries.append({
-                        'id': gallery_id,
-                        'title': title,
-                        'url': gallery_link.get('href'),
-                        'is_public': 'public' in li.get('class', [])
+                    collection_link = li.find("a")
+                    if collection_link and collection_id:
+                        collection_title_span = collection_link.find("span", class_="album_title")
+                        collection_title = collection_title_span.get_text(strip=True) if collection_title_span else ""
+                        
+                        if not collection_title and collection_link.string:
+                            collection_title = collection_link.string.strip()
+                        
+                        collections.append({
+                            'id': collection_id,
+                            'title': collection_title,
+                            'url': collection_link.get('href'),
+                            'is_public': 'public' in li.get('class', [])
+                        })
+
+        # Extract albums ("Albumokban")
+        albums_section = soup.find("section", class_="collections")
+        if albums_section and "Albumokban" in albums_section.get_text():
+            albums_container = albums_section.find("ul", class_="collections_container")
+            if albums_container:
+                for li in albums_container.find_all("li", class_=lambda x: x and "collection_" in x):
+                    album_id = None
+                    for class_name in li.get('class', []):
+                        if class_name.startswith('collection_'):
+                            album_id = class_name.split('_')[1]
+                            break
+                    
+                    album_link = li.find("a")
+                    if album_link and album_id:
+                        album_title_span = album_link.find("span", class_="album_title")
+                        album_title = album_title_span.get_text(strip=True) if album_title_span else ""
+                        
+                        if not album_title and album_link.string:
+                            album_title = album_link.string.strip()
+                        
+                        albums.append({
+                            'id': album_id,
+                            'title': album_title,
+                            'url': album_link.get('href'),
+                            'is_public': 'public' in li.get('class', [])
+                        })
+
+        # Extract tags
+        tags = []
+        tags_container = soup.find("div", class_="box_data")
+        if tags_container:
+            for tag_li in tags_container.find_all("li", class_="tag"):
+                tag_link = tag_li.find("a", class_="global-tag")
+                if tag_link:
+                    tag_name = tag_link.get_text(strip=True)
+                    # Extract count from title attribute (e.g., "Az összes kuba címkéjű kép (2714 db)")
+                    count_match = re.search(r'\((\d+)\s*db\)', tag_link.get('title', ''))
+                    count = int(count_match.group(1)) if count_match else 0
+                    tags.append({
+                        'name': tag_name,
+                        'count': count
                     })
 
         # Extract EXIF data from the table
@@ -364,19 +458,23 @@ def extract_metadata(photo_page_url):
                     high_res_url = img_link['href']
                     break
 
-        return {
+        metadata = {
             'title': title,
             'author': author,
             'author_url': author_url,
             'license': license_info,
-            'galleries': galleries,
+            'collections': collections,
+            'albums': albums,
             'camera_make': exif_data.get('Gyártó'),
             'focal_length': exif_data.get('Fókusztáv'),
             'aperture': exif_data.get('Rekesz'),
             'shutter_speed': exif_data.get('Zársebesség'),
             'taken_date': taken_date,
-            'page_url': photo_page_url
+            'page_url': photo_page_url,
+            'tags': tags
         }
+
+        return metadata
     except Exception as e:
         logger.error(f"Error extracting metadata from {photo_page_url}: {e}")
         return None
@@ -591,22 +689,57 @@ def crawl_images(start_offset=0, enable_archive=False):
                         ))
 
                         # Process galleries
-                        for gallery in metadata['galleries']:
+                        for gallery in metadata['collections']:
                             # Insert or update gallery
                             cursor.execute("""
-                                INSERT OR IGNORE INTO galleries (gallery_id, title, url, is_public)
+                                INSERT OR IGNORE INTO collections (collection_id, title, url, is_public)
                                 VALUES (?, ?, ?, ?)
                             """, (gallery['id'], gallery['title'], gallery['url'], gallery['is_public']))
                             
                             # Get gallery database ID
-                            cursor.execute("SELECT id FROM galleries WHERE gallery_id = ?", (gallery['id'],))
+                            cursor.execute("SELECT id FROM collections WHERE collection_id = ?", (gallery['id'],))
                             gallery_db_id = cursor.fetchone()[0]
                             
                             # Link image to gallery
                             cursor.execute("""
-                                INSERT INTO image_galleries (image_id, gallery_id)
+                                INSERT INTO image_collections (image_id, collection_id)
                                 VALUES ((SELECT id FROM images WHERE uuid = ?), ?)
                             """, (image_uuid, gallery_db_id))
+
+                        for gallery in metadata['albums']:
+                            # Insert or update gallery
+                            cursor.execute("""
+                                INSERT OR IGNORE INTO albums (album_id, title, url, is_public)
+                                VALUES (?, ?, ?, ?)
+                            """, (gallery['id'], gallery['title'], gallery['url'], gallery['is_public']))
+                            
+                            # Get gallery database ID
+                            cursor.execute("SELECT id FROM albums WHERE album_id = ?", (gallery['id'],))
+                            gallery_db_id = cursor.fetchone()[0]
+                            
+                            # Link image to gallery
+                            cursor.execute("""
+                                INSERT INTO image_albums (image_id, album_id)
+                                VALUES ((SELECT id FROM images WHERE uuid = ?), ?)
+                            """, (image_uuid, gallery_db_id))
+
+                        # Process tags
+                        for tag in metadata.get('tags', []):
+                            # Insert or update tag
+                            cursor.execute("""
+                                INSERT OR IGNORE INTO tags (name, count)
+                                VALUES (?, ?)
+                            """, (tag['name'], tag['count']))
+                            
+                            # Get tag database ID
+                            cursor.execute("SELECT id FROM tags WHERE name = ?", (tag['name'],))
+                            tag_db_id = cursor.fetchone()[0]
+                            
+                            # Link image to tag
+                            cursor.execute("""
+                                INSERT INTO image_tags (image_id, tag_id)
+                                VALUES ((SELECT id FROM images WHERE uuid = ?), ?)
+                            """, (image_uuid, tag_db_id))
 
                         conn.commit()
 
