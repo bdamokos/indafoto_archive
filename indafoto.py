@@ -28,13 +28,13 @@ logger = logging.getLogger(__name__)
 # TODO: Add intelligent resume feature, and error handling (e.g. if we find an error that prevents the middle 20% of the pages from being downloaded, we should skip them and continue from the next page, after the run we would fix the error and the script should find and download the missing images)
 
 # Configurations
-# If you want to save images with different characteristics, you can change the search URL template.
+# If you want to save images with different characteristics, you can change the search URL template and the total number of pages.
 SEARCH_URL_TEMPLATE = "https://indafoto.hu/search/list?profile=main&sphinx=1&search=advanced&textsearch=fulltext&textuser=&textmap=&textcompilation=&photo=&datefrom=&dateto=&licence%5B1%5D=I1%3BI2%3BII1%3BII2&licence%5B2%5D=I1%3BI2%3BI3&page_offset={}"
 BASE_DIR = "indafoto_archive"
 DB_FILE = "indafoto.db"
 TOTAL_PAGES = 14267
 BASE_RATE_LIMIT = 2  # Base seconds between requests
-BASE_TIMEOUT = 10    # Base timeout in seconds
+BASE_TIMEOUT = 60    # Base timeout in seconds
 FILES_PER_DIR = 1000  # Maximum number of files per directory
 ARCHIVE_SAMPLE_RATE = 0.005  # 0.5% sample rate for Internet Archive submissions
 
