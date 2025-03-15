@@ -1,0 +1,4 @@
+niquests
+tqdm
+beautifulsoup4
+
