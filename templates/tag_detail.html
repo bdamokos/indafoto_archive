@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+
+{% block title %}{{ tag.name }} - Tags - Indafoto Archive{% endblock %}
+
+{% block content %}
+<div class="container">
+    <nav aria-label="breadcrumb">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="/">Home</a></li>
+            <li class="breadcrumb-item"><a href="{{ url_for('browse_tags') }}">Tags</a></li>
+            <li class="breadcrumb-item active">{{ tag.name }}</li>
+        </ol>
+    </nav>
+
+    <div class="mb-4">
+        <h1>{{ tag.name }}</h1>
+        <div class="row">
+            <div class="col-md-6">
+                <div class="card mb-3">
+                    <div class="card-body">
+                        <h5 class="card-title">Statistics</h5>
+                        <ul class="list-unstyled">
+                            <li>
+                                <strong>Images in Archive:</strong> 
+                                {{ tag.archive_count }}
+                            </li>
+                            <li>
+                                <strong>Original Count on Indafoto:</strong> 
+                                {{ tag.count }}
+                            </li>
+                            <li>
+                                <strong>Preservation Rate:</strong> 
+                                {{ "%.1f"|format(tag.archive_count / tag.count * 100) if tag.count > 0 else 0 }}%
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card mb-3">
+                    <div class="card-body">
+                        <h5 class="card-title">Related Tags</h5>
+                        <div class="tag-cloud">
+                            {% for related in related_tags %}
+                            <a href="{{ url_for('tag_detail', tag_name=related.name) }}" 
+                               class="btn btn-outline-secondary btn-sm m-1"
+                               title="{{ related.count }} images">
+                                {{ related.name }}
+                                <span class="badge bg-secondary">{{ related.count }}</span>
+                            </a>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-body">
+            <h5 class="card-title">Most Active Authors</h5>
+            <div class="table-responsive">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Author</th>
+                            <th>Images with this Tag</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for author in top_authors %}
+                        <tr>
+                            <td>{{ author.name }}</td>
+                            <td>{{ author.count }}</td>
+                            <td>
+                                <a href="{{ url_for('browse_images', author=author.name, tag=tag.name) }}" 
+                                   class="btn btn-sm btn-outline-primary">
+                                    View Images
+                                </a>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Recent Images</h5>
+                    <div class="row row-cols-1 row-cols-md-2 row-cols-lg-4 g-4">
+                        {% for image in recent_images %}
+                        <div class="col">
+                            <div class="card h-100 image-card">
+                                <a href="{{ url_for('view_image', image_id=image.id) }}">
+                                    <img src="{{ url_for('serve_image', image_path=image.local_path) }}" 
+                                         class="card-img-top" 
+                                         alt="{{ image.title }}">
+                                </a>
+                                <div class="image-overlay">
+                                    <h6 class="card-title text-truncate">{{ image.title }}</h6>
+                                    <p class="card-text small mb-0">
+                                        by <a href="{{ url_for('browse_images', author=image.author) }}" class="text-white">{{ image.author }}</a>
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    
+                    {% if recent_images %}
+                    <div class="text-center mt-4">
+                        <a href="{{ url_for('browse_images', tag=tag.name) }}" class="btn btn-primary">
+                            View All Images with this Tag
+                        </a>
+                    </div>
+                    {% else %}
+                    <div class="alert alert-info">
+                        No images found with this tag.
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %} 

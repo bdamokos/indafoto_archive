@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+
+{% block title %}Marked Images - Indafoto Archive{% endblock %}
+
+{% block content %}
+<div class="container">
+    <nav aria-label="breadcrumb">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="/">Home</a></li>
+            <li class="breadcrumb-item active">Marked Images</li>
+        </ol>
+    </nav>
+
+    <div class="mb-4">
+        <h1>Marked Images</h1>
+        <p class="text-muted">Images marked as important for preservation</p>
+    </div>
+
+    <div class="row">
+        <div class="col-12">
+            <div class="card mb-4">
+                <div class="card-body">
+                    <h5 class="card-title">Quick Statistics</h5>
+                    <div class="row">
+                        <div class="col-md-3">
+                            <div class="stat-box">
+                                <h3>{{ stats.total_marked }}</h3>
+                                <p>Total Marked Images</p>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="stat-box">
+                                <h3>{{ "%.1f"|format(stats.percentage_marked) }}%</h3>
+                                <p>Of Total Archive</p>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="stat-box">
+                                <h3>{{ stats.authors_count }}</h3>
+                                <p>Different Authors</p>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="stat-box">
+                                <h3>{{ stats.with_notes }}</h3>
+                                <p>Images with Notes</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row row-cols-1 row-cols-md-2 row-cols-lg-4 g-4">
+        {% for image in images %}
+        <div class="col">
+            <div class="card h-100 image-card">
+                <a href="{{ url_for('view_image', image_id=image.id) }}">
+                    <img src="{{ url_for('serve_image', image_path=image.local_path) }}" 
+                         class="card-img-top" 
+                         alt="{{ image.title }}">
+                </a>
+                <div class="card-body">
+                    <h6 class="card-title text-truncate">{{ image.title }}</h6>
+                    <p class="card-text small mb-2">
+                        by <a href="{{ url_for('browse_images', author=image.author) }}">{{ image.author }}</a>
+                    </p>
+                    {% if image.note %}
+                    <div class="note-box">
+                        <small class="text-muted">Note:</small>
+                        <p class="mb-0">{{ image.note }}</p>
+                    </div>
+                    {% endif %}
+                    <div class="mt-2">
+                        <button class="btn btn-sm btn-outline-primary" 
+                                onclick="editNote({{ image.id }}, '{{ image.note|default('', true)|e }}')">
+                            {% if image.note %}Edit{% else %}Add{% endif %} Note
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger" 
+                                onclick="unmarkImage({{ image.id }})">
+                            Unmark
+                        </button>
+                    </div>
+                </div>
+                <div class="card-footer text-muted">
+                    <small>Marked on: {{ image.marked_date.split('T')[0] }}</small>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    {% if not images %}
+    <div class="alert alert-info mt-4">
+        No marked images found.
+    </div>
+    {% endif %}
+</div>
+
+<!-- Note Edit Modal -->
+<div class="modal fade" id="noteModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Edit Note</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="noteImageId">
+                <div class="mb-3">
+                    <label for="noteText" class="form-label">Note</label>
+                    <textarea class="form-control" id="noteText" rows="3"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="saveNote()">Save</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function editNote(imageId, currentNote) {
+    document.getElementById('noteImageId').value = imageId;
+    document.getElementById('noteText').value = currentNote;
+    new bootstrap.Modal(document.getElementById('noteModal')).show();
+}
+
+function saveNote() {
+    const imageId = document.getElementById('noteImageId').value;
+    const note = document.getElementById('noteText').value;
+    
+    fetch('/api/mark_image', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            image_id: imageId,
+            note: note,
+            marked: true
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            location.reload();
+        } else {
+            alert('Failed to save note: ' + data.error);
+        }
+    });
+}
+
+function unmarkImage(imageId) {
+    if (!confirm('Are you sure you want to unmark this image?')) {
+        return;
+    }
+    
+    fetch('/api/mark_image', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            image_id: imageId,
+            marked: false
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            location.reload();
+        } else {
+            alert('Failed to unmark image: ' + data.error);
+        }
+    });
+}
+</script>
+{% endblock %} 
