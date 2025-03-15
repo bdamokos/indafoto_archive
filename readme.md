@@ -1,17 +1,23 @@
-# Indafoto Crawler
+# Indafoto Archive Tools
 
-This tool allows you to archive photos from indafoto.hu before the service shuts down.
+This repository contains two main tools for archiving and exploring photos from indafoto.hu:
+1. Indafoto Crawler - For downloading and archiving images
+2. Archive Explorer - For browsing and organizing the archived content
+
+## Indafoto Crawler
+
+The crawler allows you to archive photos from indafoto.hu before the service shuts down.
 
 The default setting is to save freely licensed images. Change SEARCH_URL_TEMPLATE in indafoto.py if you want to save images based on different criteria (e.g. username)
 
-## Prerequisites
+### Prerequisites
 
 - Python 3.6 or higher
 - Internet connection
 
-## Setup Instructions
+### Setup Instructions
 
-### Step 1: Download the Project
+#### Step 1: Download the Project
 
 If you received this as a ZIP file, extract it to a folder on your computer.
 
@@ -21,7 +27,7 @@ If you need to download it from GitHub:
 3. Select "Download ZIP"
 4. Extract the ZIP file to a folder on your computer
 
-### Step 2: Install Python
+#### Step 2: Install Python
 
 If you don't have Python installed:
 
@@ -31,7 +37,7 @@ If you don't have Python installed:
    - On Windows: Make sure to check "Add Python to PATH" during installation
    - On Mac/Linux: The installer should handle this automatically
 
-### Step 3: Install Required Packages
+#### Step 3: Install Required Packages
 
 1. Open a command prompt or terminal
    - On Windows: Press Win+R, type `cmd` and press Enter
@@ -49,9 +55,9 @@ If you don't have Python installed:
    pip install -r requirements.txt
    ```
 
-## Running the Crawler
+### Running the Tools
 
-In the same command prompt or terminal:
+#### Crawler Usage
 
 1. Basic usage:
    ```
@@ -71,16 +77,21 @@ In the same command prompt or terminal:
    python indafoto.py --start-offset 100 --enable-archive
    ```
 
-3. The script will:
-   - Create a database to track downloaded images
-   - Create an "indafoto_archive" folder to store the downloaded images
-   - Start downloading images from indafoto.hu
-   - Show a progress bar for the current operation
-   - Track failed pages for later retry
-   - Skip already downloaded images when restarting
-   - Optionally submit pages to the Internet Archive if --enable-archive is used
+#### Archive Explorer Usage
 
-## Features
+1. Start the web interface:
+   ```
+   python indafoto_archive_explorer.py
+   ```
+
+2. Open your web browser and navigate to:
+   ```
+   http://localhost:5000
+   ```
+
+### Features
+
+#### Crawler Features
 
 - Downloads images and their metadata (title, author, license, camera info, etc.)
 - Organizes images in author-based folders
@@ -94,9 +105,34 @@ In the same command prompt or terminal:
   - Limits retry attempts to prevent infinite loops
 - Detailed logging of all operations
 
-## Error Handling
+#### Archive Explorer Features
 
-The script includes several error handling features:
+- Modern, responsive web interface
+- Browse and search archived images
+- Filter images by:
+  - Author
+  - Tag
+  - Collection
+  - Album
+- Mark important images with notes
+- View detailed image metadata:
+  - Title and author
+  - License information
+  - Camera details
+  - Collections and albums
+  - Tags
+  - Original URLs
+- Statistics dashboard showing:
+  - Total images
+  - Number of authors
+  - Popular tags
+  - Collection counts
+- Pagination for large galleries
+- Mobile-friendly interface
+
+### Error Handling
+
+The crawler includes several error handling features:
 
 1. Failed Page Tracking:
    - Pages that fail to download are recorded in the database
@@ -112,15 +148,16 @@ The script includes several error handling features:
    - Includes built-in delays between requests
    - Helps prevent server overload and blocking
 
-## Notes
+### Notes
 
-- The script includes rate limiting to avoid overloading the server
+- The crawler includes rate limiting to avoid overloading the server
 - Downloaded images are organized in folders to prevent having too many files in a single directory
 - A log file "indafoto_crawler.log" will be created to track the script's progress
 - Internet Archive submission is disabled by default to avoid potential errors
 - Failed pages are tracked and can be retried later
+- The Archive Explorer requires Flask to be installed (`pip install flask`)
 
-## Troubleshooting
+### Troubleshooting
 
 If you encounter any issues:
 
@@ -134,5 +171,9 @@ If you encounter any issues:
 5. If the script was interrupted:
    - Use `--start-offset` to resume from where it stopped
    - The script will automatically skip already downloaded images
+6. If the Archive Explorer fails to start:
+   - Ensure Flask is installed (`pip install flask`)
+   - Check if the database file exists
+   - Verify port 5000 is not in use
 
 If problems persist, please report the issue with the error message from the log file.
