@@ -62,6 +62,8 @@ In the same command prompt or terminal:
    ```
    python indafoto.py --start-offset N  # Start crawling from page N
    python indafoto.py --enable-archive  # Enable Internet Archive submissions
+   python indafoto.py --retry           # Retry previously failed pages
+   python indafoto.py --test            # Run test function for album extraction
    ```
 
    You can combine arguments:
@@ -74,9 +76,9 @@ In the same command prompt or terminal:
    - Create an "indafoto_archive" folder to store the downloaded images
    - Start downloading images from indafoto.hu
    - Show a progress bar for the current operation
+   - Track failed pages for later retry
+   - Skip already downloaded images when restarting
    - Optionally submit pages to the Internet Archive if --enable-archive is used
-
-4. Let the script run until completion. This may take a long time depending on how many images are available.
 
 ## Features
 
@@ -85,8 +87,30 @@ In the same command prompt or terminal:
 - Calculates and stores SHA-256 hashes of downloaded images
 - Optional Internet Archive submission of author pages and selected image pages
 - Rate limiting to avoid overloading the server
-- Automatic resume capability using --start-offset
+- Smart resume capability:
+  - Can restart from any page using --start-offset
+  - Automatically skips already downloaded images
+  - Tracks failed pages for later retry
+  - Limits retry attempts to prevent infinite loops
 - Detailed logging of all operations
+
+## Error Handling
+
+The script includes several error handling features:
+
+1. Failed Page Tracking:
+   - Pages that fail to download are recorded in the database
+   - Each failed page gets up to 3 retry attempts
+   - Use `--retry` to attempt recovery of failed pages
+
+2. Resume Capability:
+   - Can restart from any point using `--start-offset`
+   - Automatically skips already downloaded images
+   - Maintains database consistency when interrupted
+
+3. Rate Limiting:
+   - Includes built-in delays between requests
+   - Helps prevent server overload and blocking
 
 ## Notes
 
@@ -94,6 +118,7 @@ In the same command prompt or terminal:
 - Downloaded images are organized in folders to prevent having too many files in a single directory
 - A log file "indafoto_crawler.log" will be created to track the script's progress
 - Internet Archive submission is disabled by default to avoid potential errors
+- Failed pages are tracked and can be retried later
 
 ## Troubleshooting
 
@@ -102,6 +127,12 @@ If you encounter any issues:
 1. Make sure you have a stable internet connection
 2. Check that you've installed all required packages
 3. Review the log file for any error messages
-4. Try running the script again
+4. If pages are failing:
+   - Try running with `--retry` to attempt recovery
+   - Check your internet connection stability
+   - Consider increasing the RATE_LIMIT value in the script
+5. If the script was interrupted:
+   - Use `--start-offset` to resume from where it stopped
+   - The script will automatically skip already downloaded images
 
 If problems persist, please report the issue with the error message from the log file.
