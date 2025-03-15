@@ -33,7 +33,8 @@ SEARCH_URL_TEMPLATE = "https://indafoto.hu/search/list?profile=main&sphinx=1&sea
 BASE_DIR = "indafoto_archive"
 DB_FILE = "indafoto.db"
 TOTAL_PAGES = 14267
-RATE_LIMIT = 2  # seconds between requests
+BASE_RATE_LIMIT = 2  # Base seconds between requests
+BASE_TIMEOUT = 10    # Base timeout in seconds
 FILES_PER_DIR = 1000  # Maximum number of files per directory
 ARCHIVE_SAMPLE_RATE = 0.005  # 0.5% sample rate for Internet Archive submissions
 
@@ -202,15 +203,16 @@ def get_image_directory(author):
     
     return subdir
 
-def get_image_links(search_page_url):
+def get_image_links(search_page_url, attempt=1):
     """Extract image links from a search result page."""
     try:
-        logger.info(f"Attempting to fetch URL: {search_page_url}")
+        logger.info(f"Attempting to fetch URL: {search_page_url} (attempt {attempt})")
+        timeout = BASE_TIMEOUT * attempt  # Progressive timeout
         response = requests.get(
             search_page_url,
             headers=HEADERS,
             cookies=COOKIES,
-            timeout=10,
+            timeout=timeout,
             allow_redirects=True
         )
         
@@ -309,10 +311,11 @@ def parse_hungarian_date(date_str):
         logger.warning(f"Failed to parse Hungarian date '{date_str}': {e}")
     return None
 
-def extract_metadata(photo_page_url):
+def extract_metadata(photo_page_url, attempt=1):
     """Extract metadata from a photo page."""
     try:
-        response = requests.get(photo_page_url, headers=HEADERS, cookies=COOKIES, timeout=10)
+        timeout = BASE_TIMEOUT * attempt  # Progressive timeout
+        response = requests.get(photo_page_url, headers=HEADERS, cookies=COOKIES, timeout=timeout)
         if not response.ok:
             logger.error(f"Failed to fetch metadata from {photo_page_url}: HTTP {response.status_code}")
             return None
@@ -663,9 +666,10 @@ def retry_failed_pages(conn, cursor):
     for page_number, url, attempts in failed_pages:
         try:
             logger.info(f"Retrying page {page_number} (attempt {attempts + 1})")
-            image_data_list = get_image_links(url)
+            # Pass the attempt number to get_image_links for progressive timeout
+            image_data_list = get_image_links(url, attempt=attempts + 1)
             
-            if process_image_list(image_data_list, conn, cursor):
+            if process_image_list(image_data_list, conn, cursor, attempt=attempts + 1):
                 # Update status to success if all images were processed
                 cursor.execute("""
                     UPDATE failed_pages 
@@ -688,7 +692,8 @@ def retry_failed_pages(conn, cursor):
                 """, (datetime.now().isoformat(), page_number))
             
             conn.commit()
-            time.sleep(RATE_LIMIT)
+            # Progressive rate limiting
+            time.sleep(BASE_RATE_LIMIT * (attempts + 1))
             
         except Exception as e:
             logger.error(f"Error retrying page {page_number}: {e}")
@@ -705,7 +710,7 @@ def retry_failed_pages(conn, cursor):
             """, (datetime.now().isoformat(), str(e), page_number))
             conn.commit()
 
-def process_image_list(image_data_list, conn, cursor, archive_queue=None):
+def process_image_list(image_data_list, conn, cursor, archive_queue=None, attempt=1):
     """Process a list of images, returns True if all images were processed successfully."""
     if not image_data_list:
         return True
@@ -727,7 +732,8 @@ def process_image_list(image_data_list, conn, cursor, archive_queue=None):
             if cursor.fetchone():
                 continue
 
-            metadata = extract_metadata(photo_page_url)
+            # Pass attempt number to extract_metadata for progressive timeout
+            metadata = extract_metadata(photo_page_url, attempt=attempt)
             if not metadata:
                 success = False
                 continue
@@ -875,9 +881,9 @@ def crawl_images(start_offset=0, enable_archive=False, retry_mode=False):
                 if cursor.fetchone():
                     continue
                 
-                image_data_list = get_image_links(search_page_url)
+                image_data_list = get_image_links(search_page_url, attempt=1)
                 
-                if not process_image_list(image_data_list, conn, cursor, archive_queue):
+                if not process_image_list(image_data_list, conn, cursor, archive_queue, attempt=1):
                     # If processing wasn't completely successful, add to failed_pages
                     cursor.execute("""
                         INSERT OR REPLACE INTO failed_pages (
@@ -886,7 +892,7 @@ def crawl_images(start_offset=0, enable_archive=False, retry_mode=False):
                     """, (page, search_page_url, datetime.now().isoformat()))
                     conn.commit()
                 
-                time.sleep(RATE_LIMIT)
+                time.sleep(BASE_RATE_LIMIT)
 
             except Exception as e:
                 logger.error(f"Error processing page {page}: {e}")
