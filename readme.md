@@ -53,24 +53,47 @@ If you don't have Python installed:
 
 In the same command prompt or terminal:
 
-1. Run the script:
+1. Basic usage:
    ```
    python indafoto.py
    ```
 
-2. The script will:
+2. Available command-line arguments:
+   ```
+   python indafoto.py --start-offset N  # Start crawling from page N
+   python indafoto.py --enable-archive  # Enable Internet Archive submissions
+   ```
+
+   You can combine arguments:
+   ```
+   python indafoto.py --start-offset 100 --enable-archive
+   ```
+
+3. The script will:
    - Create a database to track downloaded images
    - Create an "indafoto_archive" folder to store the downloaded images
    - Start downloading images from indafoto.hu
    - Show a progress bar for the current operation
+   - Optionally submit pages to the Internet Archive if --enable-archive is used
 
-3. Let the script run until completion. This may take a long time depending on how many images are available.
+4. Let the script run until completion. This may take a long time depending on how many images are available.
+
+## Features
+
+- Downloads images and their metadata (title, author, license, camera info, etc.)
+- Organizes images in author-based folders
+- Calculates and stores SHA-256 hashes of downloaded images
+- Optional Internet Archive submission of author pages and selected image pages
+- Rate limiting to avoid overloading the server
+- Automatic resume capability using --start-offset
+- Detailed logging of all operations
 
 ## Notes
 
 - The script includes rate limiting to avoid overloading the server
 - Downloaded images are organized in folders to prevent having too many files in a single directory
 - A log file "indafoto_crawler.log" will be created to track the script's progress
+- Internet Archive submission is disabled by default to avoid potential errors
 
 ## Troubleshooting
 

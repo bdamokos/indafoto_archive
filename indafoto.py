@@ -82,7 +82,6 @@ def init_db():
         aperture TEXT,
         shutter_speed TEXT,
         taken_date TEXT,
-        upload_date TEXT,
         page_url TEXT
     )
     """)
@@ -211,7 +210,7 @@ def get_image_links(search_page_url):
         return []
 
 def parse_hungarian_date(date_str):
-    """Parse a date string in Hungarian format."""
+    """Parse a date string in Hungarian format with optional time."""
     if not date_str:
         return None
         
@@ -223,17 +222,34 @@ def parse_hungarian_date(date_str):
     }
     
     try:
-        # Split the date string
-        parts = date_str.strip().split('. ')
-        if len(parts) >= 3:
-            year = parts[0]
+        # Remove any leading/trailing whitespace and "Készült:" prefix
+        date_str = date_str.replace('Készült:', '').strip()
+        
+        # Split into date and time parts
+        parts = date_str.split(' ')
+        
+        # Handle date part
+        if len(parts) >= 3:  # At least year, month, day
+            year = parts[0].rstrip('.')
             month = parts[1].lower()
             day = parts[2].rstrip('.')
             
             # Convert month name to number
             month_num = hu_months.get(month)
-            if month_num:
-                return f"{year}-{month_num}-{day.zfill(2)}"
+            if not month_num:
+                return None
+                
+            # Format date part
+            formatted_date = f"{year}-{month_num}-{day.zfill(2)}"
+            
+            # If time is present (format: HH:MM)
+            if len(parts) >= 4:
+                time_str = parts[3]
+                if ':' in time_str:
+                    return f"{formatted_date} {time_str}"
+            
+            return formatted_date
+            
     except Exception as e:
         logger.warning(f"Failed to parse Hungarian date '{date_str}': {e}")
     return None
@@ -305,7 +321,6 @@ def extract_metadata(photo_page_url):
                     })
 
         # Extract EXIF data from the table
-        
         exif_data = {}
         exif_table = soup.find('table')
         if exif_table:
@@ -316,17 +331,8 @@ def extract_metadata(photo_page_url):
                     value = cols[1].text.strip()
                     exif_data[key] = value
 
-        # Extract dates
-        upload_date = None
+        # Extract taken date from EXIF
         taken_date = None
-        
-        # Try to parse upload date
-        # TODO: Convert upload date into date format for saving in the database?
-        date_elem = soup.find(text=re.compile(r'\d{4}\. \w+\. \d{1,2}\.'))
-        if date_elem:
-            upload_date = parse_hungarian_date(date_elem.strip())
-            
-        # Try to parse taken date from EXIF
         if 'Készült' in exif_data:
             taken_date = parse_hungarian_date(exif_data['Készült'])
 
@@ -369,8 +375,6 @@ def extract_metadata(photo_page_url):
             'aperture': exif_data.get('Rekesz'),
             'shutter_speed': exif_data.get('Zársebesség'),
             'taken_date': taken_date,
-            'upload_date': upload_date,
-            'high_res_url': high_res_url,
             'page_url': photo_page_url
         }
     except Exception as e:
@@ -511,15 +515,18 @@ def extract_image_id(url):
         logger.error(f"Failed to extract image ID from URL {url}: {e}")
         return hashlib.md5(url.encode()).hexdigest()[:12]
 
-def crawl_images(start_offset=0):
+def crawl_images(start_offset=0, enable_archive=False):
     """Main function to crawl images and save metadata."""
     conn = init_db()
     cursor = conn.cursor()
     
-    # Initialize archive submission queue and worker
-    archive_queue = queue.Queue()
-    archive_worker = ArchiveSubmitter(archive_queue)
-    archive_worker.start()
+    # Initialize archive submission queue and worker only if enabled
+    archive_queue = None
+    archive_worker = None
+    if enable_archive:
+        archive_queue = queue.Queue()
+        archive_worker = ArchiveSubmitter(archive_queue)
+        archive_worker.start()
     
     # Track authors and their image counts for archive sampling
     author_image_counts = {}
@@ -547,8 +554,22 @@ def crawl_images(start_offset=0):
                         if not metadata:
                             continue
 
+                        # Try to get high-res version of the image
+                        download_url = image_url
+                        if '_l.jpg' in image_url:
+                            # Try higher resolution versions
+                            for res in ['_xxl.jpg', '_xl.jpg']:
+                                test_url = image_url.replace('_l.jpg', res)
+                                try:
+                                    head_response = requests.head(test_url, headers=HEADERS, timeout=5)
+                                    if head_response.ok:
+                                        download_url = test_url
+                                        break
+                                except:
+                                    continue
+
                         # Download image
-                        download_result = download_image(metadata['high_res_url'] or image_url, metadata['author'])
+                        download_result = download_image(download_url, metadata['author'])
                         if not download_result[0]:  # If filename is None
                             continue
                         
@@ -559,15 +580,14 @@ def crawl_images(start_offset=0):
                             INSERT INTO images (
                                 uuid, url, local_path, sha256_hash, title, author, author_url,
                                 license, camera_make, focal_length, aperture,
-                                shutter_speed, taken_date, upload_date, page_url
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                shutter_speed, taken_date, page_url
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
-                            image_uuid, image_url, local_path, file_hash, metadata['title'],
+                            image_uuid, download_url, local_path, file_hash, metadata['title'],
                             metadata['author'], metadata['author_url'], metadata['license'],
                             metadata['camera_make'], metadata['focal_length'],
                             metadata['aperture'], metadata['shutter_speed'],
-                            metadata['taken_date'], metadata['upload_date'],
-                            photo_page_url
+                            metadata['taken_date'], photo_page_url
                         ))
 
                         # Process galleries
@@ -590,17 +610,18 @@ def crawl_images(start_offset=0):
 
                         conn.commit()
 
-                        # Handle Internet Archive submissions
-                        author = metadata['author']
-                        author_image_counts[author] = author_image_counts.get(author, 0) + 1
-                        
-                        # Submit author page if this is their first image
-                        if author_image_counts[author] == 1 and metadata['author_url']:
-                            archive_queue.put((metadata['author_url'], 'author_page'))
-                        
-                        # Submit image page based on sampling rate
-                        if author_image_counts[author] == 1 or random.random() < ARCHIVE_SAMPLE_RATE:
-                            archive_queue.put((photo_page_url, 'image_page'))
+                        # Handle Internet Archive submissions if enabled
+                        if enable_archive:
+                            author = metadata['author']
+                            author_image_counts[author] = author_image_counts.get(author, 0) + 1
+                            
+                            # Submit author page if this is their first image
+                            if author_image_counts[author] == 1 and metadata['author_url']:
+                                archive_queue.put((metadata['author_url'], 'author_page'))
+                            
+                            # Submit image page based on sampling rate
+                            if author_image_counts[author] == 1 or random.random() < ARCHIVE_SAMPLE_RATE:
+                                archive_queue.put((photo_page_url, 'image_page'))
 
                     except Exception as e:
                         logger.error(f"Error processing image {image_url}: {e}")
@@ -617,9 +638,10 @@ def crawl_images(start_offset=0):
     except Exception as e:
         logger.critical(f"Unexpected error occurred: {e}", exc_info=True)
     finally:
-        # Signal archive worker to stop
-        archive_queue.put((None, None))
-        archive_worker.join()
+        # Stop archive worker if it was started
+        if enable_archive and archive_worker:
+            archive_queue.put((None, None))
+            archive_worker.join()
         
         conn.close()
         logger.info("Crawler finished, database connection closed")
@@ -628,9 +650,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Indafoto Crawler')
     parser.add_argument('--start-offset', type=int, default=0,
                        help='Page offset to start crawling from')
+    parser.add_argument('--enable-archive', action='store_true',
+                       help='Enable Internet Archive submissions (disabled by default)')
     args = parser.parse_args()
     
     try:
-        crawl_images(start_offset=args.start_offset)
+        crawl_images(start_offset=args.start_offset, enable_archive=args.enable_archive)
     except Exception as e:
         logger.critical(f"Unexpected error occurred: {e}", exc_info=True)
