@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+
+{% block title %}Browse Collections{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h1>Collections</h1>
+    
+    <!-- Statistics -->
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Total Collections</h5>
+                    <p class="card-text display-4">{{ stats.total_collections }}</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Total Images</h5>
+                    <p class="card-text display-4">{{ stats.total_images }}</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Public Collections</h5>
+                    <p class="card-text display-4">{{ stats.total_public }}</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Private Collections</h5>
+                    <p class="card-text display-4">{{ stats.total_private }}</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Collections Grid -->
+    <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4">
+        {% for collection in collections %}
+        <div class="col">
+            <div class="card h-100">
+                {% if collection.thumbnail_path %}
+                <a href="{{ url_for('collection_gallery', collection_id=collection.id) }}">
+                    <img src="{{ url_for('serve_image', image_path=collection.thumbnail_path) }}" 
+                         class="card-img-top" 
+                         alt="{{ collection.thumbnail_title }}"
+                         style="height: 200px; object-fit: cover;">
+                </a>
+                {% else %}
+                <div class="card-img-top bg-light d-flex align-items-center justify-content-center" 
+                     style="height: 200px;">
+                    <span class="text-muted">No thumbnail</span>
+                </div>
+                {% endif %}
+                <div class="card-body">
+                    <h5 class="card-title">
+                        <a href="{{ url_for('collection_gallery', collection_id=collection.id) }}" 
+                           class="text-decoration-none">
+                            {{ collection.title }}
+                        </a>
+                    </h5>
+                    <p class="card-text">
+                        <span class="badge bg-primary">{{ collection.image_count }} images</span>
+                        {% if collection.is_public %}
+                        <span class="badge bg-success">Public</span>
+                        {% else %}
+                        <span class="badge bg-secondary">Private</span>
+                        {% endif %}
+                    </p>
+                    {% if collection.url %}
+                    <a href="{{ collection.url }}" 
+                       class="btn btn-outline-secondary btn-sm" 
+                       target="_blank">
+                        Original Collection
+                    </a>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %} 

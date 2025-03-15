@@ -493,6 +493,90 @@ def tag_detail(tag_name):
                          top_authors=top_authors,
                          recent_images=recent_images)
 
+@app.route('/albums')
+def browse_albums():
+    """View all albums with their first image as thumbnail."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get all albums with their image counts and first image
+    cursor.execute("""
+        WITH album_stats AS (
+            SELECT a.id, a.title, a.url, a.is_public,
+                   COUNT(DISTINCT ia.image_id) as image_count,
+                   MIN(i.id) as first_image_id  -- Get the earliest image as thumbnail
+            FROM albums a
+            LEFT JOIN image_albums ia ON a.id = ia.album_id
+            LEFT JOIN images i ON ia.image_id = i.id
+            GROUP BY a.id
+        )
+        SELECT 
+            as1.*,
+            i.local_path as thumbnail_path,
+            i.title as thumbnail_title
+        FROM album_stats as1
+        LEFT JOIN images i ON as1.first_image_id = i.id
+        ORDER BY as1.image_count DESC, as1.title
+    """)
+    
+    albums = cursor.fetchall()
+    
+    # Get some statistics
+    stats = {
+        'total_albums': len(albums),
+        'total_public': sum(1 for album in albums if album['is_public']),
+        'total_private': sum(1 for album in albums if not album['is_public']),
+        'total_images': sum(album['image_count'] for album in albums)
+    }
+    
+    conn.close()
+    
+    return render_template('browse_albums.html',
+                         albums=albums,
+                         stats=stats)
+
+@app.route('/collections')
+def browse_collections():
+    """View all collections with their first image as thumbnail."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get all collections with their image counts and first image
+    cursor.execute("""
+        WITH collection_stats AS (
+            SELECT c.id, c.title, c.url, c.is_public,
+                   COUNT(DISTINCT ic.image_id) as image_count,
+                   MIN(i.id) as first_image_id  -- Get the earliest image as thumbnail
+            FROM collections c
+            LEFT JOIN image_collections ic ON c.id = ic.collection_id
+            LEFT JOIN images i ON ic.image_id = i.id
+            GROUP BY c.id
+        )
+        SELECT 
+            cs.*,
+            i.local_path as thumbnail_path,
+            i.title as thumbnail_title
+        FROM collection_stats cs
+        LEFT JOIN images i ON cs.first_image_id = i.id
+        ORDER BY cs.image_count DESC, cs.title
+    """)
+    
+    collections = cursor.fetchall()
+    
+    # Get some statistics
+    stats = {
+        'total_collections': len(collections),
+        'total_public': sum(1 for collection in collections if collection['is_public']),
+        'total_private': sum(1 for collection in collections if not collection['is_public']),
+        'total_images': sum(collection['image_count'] for collection in collections)
+    }
+    
+    conn.close()
+    
+    return render_template('browse_collections.html',
+                         collections=collections,
+                         stats=stats)
+
 def create_app():
     """Create and configure the Flask application."""
     # Ensure the templates directory exists

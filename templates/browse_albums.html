@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+
+{% block title %}Browse Albums{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h1>Albums</h1>
+    
+    <!-- Statistics -->
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Total Albums</h5>
+                    <p class="card-text display-4">{{ stats.total_albums }}</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Total Images</h5>
+                    <p class="card-text display-4">{{ stats.total_images }}</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Public Albums</h5>
+                    <p class="card-text display-4">{{ stats.total_public }}</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Private Albums</h5>
+                    <p class="card-text display-4">{{ stats.total_private }}</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Albums Grid -->
+    <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4">
+        {% for album in albums %}
+        <div class="col">
+            <div class="card h-100">
+                {% if album.thumbnail_path %}
+                <a href="{{ url_for('album_gallery', album_id=album.id) }}">
+                    <img src="{{ url_for('serve_image', image_path=album.thumbnail_path) }}" 
+                         class="card-img-top" 
+                         alt="{{ album.thumbnail_title }}"
+                         style="height: 200px; object-fit: cover;">
+                </a>
+                {% else %}
+                <div class="card-img-top bg-light d-flex align-items-center justify-content-center" 
+                     style="height: 200px;">
+                    <span class="text-muted">No thumbnail</span>
+                </div>
+                {% endif %}
+                <div class="card-body">
+                    <h5 class="card-title">
+                        <a href="{{ url_for('album_gallery', album_id=album.id) }}" 
+                           class="text-decoration-none">
+                            {{ album.title }}
+                        </a>
+                    </h5>
+                    <p class="card-text">
+                        <span class="badge bg-primary">{{ album.image_count }} images</span>
+                        {% if album.is_public %}
+                        <span class="badge bg-success">Public</span>
+                        {% else %}
+                        <span class="badge bg-secondary">Private</span>
+                        {% endif %}
+                    </p>
+                    {% if album.url %}
+                    <a href="{{ album.url }}" 
+                       class="btn btn-outline-secondary btn-sm" 
+                       target="_blank">
+                        Original Album
+                    </a>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %} 
