@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+
+{% block title %}{{ image.title }} - Indafoto Archive Explorer{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-8">
+        <div class="card">
+            <img src="/image_file/{{ image.local_path }}" class="card-img-top" alt="{{ image.title }}">
+            <div class="card-body">
+                <h2 class="card-title">{{ image.title }}</h2>
+                <p class="card-text">
+                    by <a href="/author/{{ image.author }}">{{ image.author }}</a>
+                </p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-4">
+        <div class="card mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">Image Details</h5>
+                <button class="btn btn-link p-0" 
+                        onclick="toggleMark({{ image.id }}, this)"
+                        data-marked="{{ marked is not none }}">
+                    <i class="fa{{ 's' if marked else 'r' }} fa-star fa-lg"></i>
+                </button>
+            </div>
+            <div class="card-body">
+                {% if marked %}
+                <div class="alert alert-warning">
+                    <h6>Marked as Important</h6>
+                    {% if marked.note %}
+                    <p class="mb-0"><small>Note: {{ marked.note }}</small></p>
+                    {% endif %}
+                    <small class="text-muted">Marked on: {{ marked.marked_date }}</small>
+                </div>
+                {% endif %}
+                
+                <h6>License</h6>
+                <p>{{ image.license }}</p>
+                
+                {% if image.taken_date %}
+                <h6>Date Taken</h6>
+                <p>{{ image.taken_date }}</p>
+                {% endif %}
+                
+                {% if image.camera_make or image.focal_length or image.aperture or image.shutter_speed %}
+                <h6>Camera Details</h6>
+                <ul class="list-unstyled">
+                    {% if image.camera_make %}
+                    <li><small>Camera: {{ image.camera_make }}</small></li>
+                    {% endif %}
+                    {% if image.focal_length %}
+                    <li><small>Focal Length: {{ image.focal_length }}</small></li>
+                    {% endif %}
+                    {% if image.aperture %}
+                    <li><small>Aperture: {{ image.aperture }}</small></li>
+                    {% endif %}
+                    {% if image.shutter_speed %}
+                    <li><small>Shutter Speed: {{ image.shutter_speed }}</small></li>
+                    {% endif %}
+                </ul>
+                {% endif %}
+                
+                {% if collections %}
+                <h6>Collections</h6>
+                <div class="list-group list-group-flush mb-3">
+                    {% for collection in collections %}
+                    <a href="/collection/{{ collection.id }}" class="list-group-item list-group-item-action">
+                        {{ collection.title }}
+                        {% if not collection.is_public %}
+                        <span class="badge bg-secondary">Private</span>
+                        {% endif %}
+                    </a>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                
+                {% if albums %}
+                <h6>Albums</h6>
+                <div class="list-group list-group-flush mb-3">
+                    {% for album in albums %}
+                    <a href="/album/{{ album.id }}" class="list-group-item list-group-item-action">
+                        {{ album.title }}
+                        {% if not album.is_public %}
+                        <span class="badge bg-secondary">Private</span>
+                        {% endif %}
+                    </a>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                
+                {% if tags %}
+                <h6>Tags</h6>
+                <div class="mb-3">
+                    {% for tag in tags %}
+                    <a href="/tag/{{ tag.name }}" class="badge bg-primary text-decoration-none me-1">
+                        {{ tag.name }}
+                    </a>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                
+                <h6>Original URLs</h6>
+                <ul class="list-unstyled">
+                    <li><small><a href="{{ image.page_url }}" target="_blank">Image Page</a></small></li>
+                    <li><small><a href="{{ image.url }}" target="_blank">Direct Image</a></small></li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %} 

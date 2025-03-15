@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+
+{% block title %}Browse Images - Indafoto Archive Explorer{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col">
+        <h1>Browse Images</h1>
+    </div>
+</div>
+
+<div class="filter-section">
+    <form method="get" action="/images" class="row g-3">
+        <div class="col-md-3">
+            <label for="author" class="form-label">Author</label>
+            <select name="author" id="author" class="form-select">
+                <option value="">All Authors</option>
+                {% for author_name in authors %}
+                <option value="{{ author_name }}" {% if current_filters.author == author_name %}selected{% endif %}>
+                    {{ author_name }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        
+        <div class="col-md-3">
+            <label for="tag" class="form-label">Tag</label>
+            <select name="tag" id="tag" class="form-select">
+                <option value="">All Tags</option>
+                {% for tag_name in tags %}
+                <option value="{{ tag_name }}" {% if current_filters.tag == tag_name %}selected{% endif %}>
+                    {{ tag_name }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        
+        <div class="col-md-3">
+            <label for="collection" class="form-label">Collection</label>
+            <select name="collection" id="collection" class="form-select">
+                <option value="">All Collections</option>
+                {% for collection_name in collections %}
+                <option value="{{ collection_name }}" {% if current_filters.collection == collection_name %}selected{% endif %}>
+                    {{ collection_name }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        
+        <div class="col-md-3">
+            <label for="album" class="form-label">Album</label>
+            <select name="album" id="album" class="form-select">
+                <option value="">All Albums</option>
+                {% for album_name in albums %}
+                <option value="{{ album_name }}" {% if current_filters.album == album_name %}selected{% endif %}>
+                    {{ album_name }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        
+        <div class="col-12">
+            <div class="form-check">
+                <input class="form-check-input" type="checkbox" name="marked" id="marked" value="true"
+                       {% if current_filters.marked %}checked{% endif %}>
+                <label class="form-check-label" for="marked">
+                    Show only marked images
+                </label>
+            </div>
+        </div>
+        
+        <div class="col-12">
+            <button type="submit" class="btn btn-primary">Apply Filters</button>
+            <a href="/images" class="btn btn-secondary">Clear Filters</a>
+        </div>
+    </form>
+</div>
+
+<div class="row">
+    {% for image in images %}
+    <div class="col-md-3 mb-4">
+        <div class="card image-card">
+            <a href="/image/{{ image.id }}">
+                <img src="/image_file/{{ image.local_path }}" class="card-img-top" alt="{{ image.title }}">
+                {% if image.id in marked_images %}
+                <div class="marked-badge" id="marked-badge-{{ image.id }}">
+                    <i class="fas fa-star"></i>
+                </div>
+                {% endif %}
+                <div class="image-overlay">
+                    <h6 class="mb-1">{{ image.title }}</h6>
+                    <small>by {{ image.author }}</small>
+                </div>
+            </a>
+            <div class="card-footer d-flex justify-content-between align-items-center">
+                <small class="text-muted">{{ image.taken_date }}</small>
+                <button class="btn btn-link p-0" 
+                        onclick="toggleMark({{ image.id }}, this)"
+                        data-marked="{{ image.id in marked_images|default([]) }}">
+                    <i class="fa{{ 's' if image.id in marked_images else 'r' }} fa-star"></i>
+                </button>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+{% if total_pages > 1 %}
+<div class="pagination-container">
+    <nav>
+        <ul class="pagination justify-content-center">
+            {% if page > 1 %}
+            <li class="page-item">
+                <a class="page-link" href="{{ request.path }}?page={{ page - 1 }}&{{ request.query_string|replace('page=' ~ page, '')|replace('&&', '&')|replace('?&', '?') }}">Previous</a>
+            </li>
+            {% endif %}
+            
+            {% for p in range(max(1, page - 2), min(total_pages + 1, page + 3)) %}
+            <li class="page-item {{ 'active' if p == page else '' }}">
+                <a class="page-link" href="{{ request.path }}?page={{ p }}&{{ request.query_string|replace('page=' ~ page, '')|replace('&&', '&')|replace('?&', '?') }}">{{ p }}</a>
+            </li>
+            {% endfor %}
+            
+            {% if page < total_pages %}
+            <li class="page-item">
+                <a class="page-link" href="{{ request.path }}?page={{ page + 1 }}&{{ request.query_string|replace('page=' ~ page, '')|replace('&&', '&')|replace('?&', '?') }}">Next</a>
+            </li>
+            {% endif %}
+        </ul>
+    </nav>
+</div>
+{% endif %}
+{% endblock %} 
