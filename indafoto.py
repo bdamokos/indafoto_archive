@@ -167,7 +167,8 @@ def init_db():
         submission_date TEXT,
         type TEXT,  -- 'author_page', 'image_page', 'gallery_page'
         status TEXT,
-        archive_url TEXT
+        archive_url TEXT,
+        error TEXT  -- Store error messages
     )
     """)
     
@@ -183,6 +184,12 @@ def init_db():
         status TEXT DEFAULT 'pending'  -- 'pending', 'retried', 'success', 'failed'
     )
     """)
+    
+    # Add error column if it doesn't exist
+    try:
+        cursor.execute("ALTER TABLE archive_submissions ADD COLUMN error TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     
     conn.commit()
     return conn
@@ -584,9 +591,57 @@ class ArchiveSubmitter(threading.Thread):
         super().__init__()
         self.queue = queue
         self.daemon = True
+        self.archive_services = [
+            {
+                'name': 'archive.org',
+                'submit_url': 'https://web.archive.org/save/{}',
+                'view_url': 'https://web.archive.org/web/*/{}'
+            },
+            {
+                'name': 'archive.ph',
+                'submit_url': 'https://archive.ph/submit/',
+                'view_url': 'https://archive.ph/{}'
+            }
+        ]
+
+    def submit_to_archive_org(self, url, timeout=60):
+        """Submit URL to archive.org with extended timeout."""
+        try:
+            archive_url = f"https://web.archive.org/save/{url}"
+            response = requests.get(archive_url, timeout=timeout)
+            return {
+                'success': response.ok,
+                'archive_url': f"https://web.archive.org/web/*/{url}" if response.ok else None
+            }
+        except Exception as e:
+            logger.error(f"Failed to submit to archive.org: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def submit_to_archive_ph(self, url, timeout=30):
+        """Submit URL to archive.ph (formerly archive.is)."""
+        try:
+            data = {'url': url}
+            headers = {
+                'User-Agent': HEADERS['User-Agent'],
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            }
+            response = requests.post('https://archive.ph/submit/', 
+                                  data=data, 
+                                  headers=headers,
+                                  timeout=timeout,
+                                  allow_redirects=True)
+            
+            # archive.ph redirects to the archived page on success
+            success = response.ok and 'archive.ph' in response.url
+            return {
+                'success': success,
+                'archive_url': response.url if success else None
+            }
+        except Exception as e:
+            logger.error(f"Failed to submit to archive.ph: {e}")
+            return {'success': False, 'error': str(e)}
 
     def run(self):
-        # Create connection in the thread that will use it
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         
@@ -597,26 +652,52 @@ class ArchiveSubmitter(threading.Thread):
                     break
                     
                 # Check if already submitted
-                cursor.execute("SELECT 1 FROM archive_submissions WHERE url = ?", (url,))
-                if cursor.fetchone():
+                cursor.execute("SELECT archive_url FROM archive_submissions WHERE url = ?", (url,))
+                result = cursor.fetchone()
+                if result and result[0]:
                     self.queue.task_done()
                     continue
 
-                # Submit to Internet Archive
-                try:
-                    archive_url = f"https://web.archive.org/save/{url}"
-                    response = requests.get(archive_url, timeout=30)
-                    status = "success" if response.ok else "failed"
+                # Try each archive service in order until one succeeds
+                archive_url = None
+                status = 'failed'
+                error_messages = []
+                
+                # First try archive.org
+                result = self.submit_to_archive_org(url)
+                if result['success']:
+                    archive_url = result['archive_url']
+                    status = 'success'
+                else:
+                    error_messages.append(f"archive.org: {result.get('error', 'Unknown error')}")
                     
-                    cursor.execute("""
-                        INSERT INTO archive_submissions (url, submission_date, type, status, archive_url)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (url, datetime.now().isoformat(), url_type, status, 
-                         f"https://web.archive.org/web/*/{url}" if response.ok else None))
-                    conn.commit()
-                    
-                except Exception as e:
-                    logger.error(f"Failed to submit {url} to Internet Archive: {e}")
+                    # Try archive.ph as fallback
+                    result = self.submit_to_archive_ph(url)
+                    if result['success']:
+                        archive_url = result['archive_url']
+                        status = 'success'
+                    else:
+                        error_messages.append(f"archive.ph: {result.get('error', 'Unknown error')}")
+
+                # Record the attempt
+                cursor.execute("""
+                    INSERT OR REPLACE INTO archive_submissions (
+                        url, submission_date, type, status, archive_url, error
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    url,
+                    datetime.now().isoformat(),
+                    url_type,
+                    status,
+                    archive_url,
+                    '; '.join(error_messages) if error_messages else None
+                ))
+                conn.commit()
+                
+                if status == 'success':
+                    logger.info(f"Successfully archived {url} to {archive_url}")
+                else:
+                    logger.warning(f"Failed to archive {url}. Errors: {'; '.join(error_messages)}")
                     
                 self.queue.task_done()
                 time.sleep(5)  # Rate limit archive submissions
@@ -625,7 +706,6 @@ class ArchiveSubmitter(threading.Thread):
                 logger.error(f"Error in archive submitter: {e}")
                 continue
                 
-        # Close connection when thread exits
         conn.close()
 
 def extract_image_id(url):
