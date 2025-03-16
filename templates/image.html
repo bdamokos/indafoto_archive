@@ -172,6 +172,10 @@
                     <strong>Status:</strong> Archived successfully on {{ author_archive.submission_date }}
                     <br>
                     <a href="{{ author_archive.archive_url }}" target="_blank">View archived author page</a>
+                    {% if author_details_archive and author_details_archive.status == 'success' %}
+                    <br>
+                    <a href="{{ author_details_archive.archive_url }}" target="_blank">View archived author details</a>
+                    {% endif %}
                 </p>
             {% else %}
                 <p class="archive-failed">

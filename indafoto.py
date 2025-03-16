@@ -35,7 +35,7 @@ SEARCH_URL_TEMPLATE = "https://indafoto.hu/search/list?profile=main&sphinx=1&sea
 BASE_DIR = "indafoto_archive"
 DB_FILE = "indafoto.db"
 TOTAL_PAGES = 14267
-BASE_RATE_LIMIT = 2  # Base seconds between requests
+BASE_RATE_LIMIT = 1  # Base seconds between requests
 BASE_TIMEOUT = 60    # Base timeout in seconds
 FILES_PER_DIR = 1000  # Maximum number of files per directory
 ARCHIVE_SAMPLE_RATE = 0.005  # 0.5% sample rate for Internet Archive submissions
@@ -1017,6 +1017,9 @@ def process_image_list(image_data_list, conn, cursor, archive_queue=None, attemp
                 # Submit author page if this is their first image
                 if author_image_counts[author] == 1 and metadata['author_url']:
                     archive_queue.put((metadata['author_url'], 'author_page'))
+                    # Also submit the author details page
+                    author_details_url = f"https://indafoto.hu/{metadata['author']}/details"
+                    archive_queue.put((author_details_url, 'author_details'))
                 
                 # Submit image page based on sampling rate
                 if author_image_counts[author] == 1 or random.random() < ARCHIVE_SAMPLE_RATE:

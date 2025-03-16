@@ -601,6 +601,7 @@ def view_image(image_id):
     
     # Get archive information for the author page
     author_archive = None
+    author_details_archive = None
     if image['author_url']:
         cursor.execute("""
             SELECT archive_url, status, submission_date
@@ -610,6 +611,17 @@ def view_image(image_id):
             LIMIT 1
         """, (image['author_url'],))
         author_archive = cursor.fetchone()
+
+        # Get archive information for author details page
+        author_details_url = f"https://indafoto.hu/{image['author']}/details"
+        cursor.execute("""
+            SELECT archive_url, status, submission_date
+            FROM archive_submissions
+            WHERE url = ? AND type = 'author_details'
+            ORDER BY submission_date DESC
+            LIMIT 1
+        """, (author_details_url,))
+        author_details_archive = cursor.fetchone()
     
     # Process archive URLs to handle submission URLs
     if image_archive:
@@ -619,6 +631,10 @@ def view_image(image_id):
     if author_archive:
         author_archive = dict(author_archive)
         author_archive['archive_url'] = get_archive_url(author_archive['archive_url'], image['author_url'])
+
+    if author_details_archive:
+        author_details_archive = dict(author_details_archive)
+        author_details_archive['archive_url'] = get_archive_url(author_details_archive['archive_url'], author_details_url)
     
     conn.close()
     
@@ -630,7 +646,8 @@ def view_image(image_id):
                          marked=marked,
                          note=note,
                          image_archive=image_archive,
-                         author_archive=author_archive)
+                         author_archive=author_archive,
+                         author_details_archive=author_details_archive)
 
 @app.route('/api/mark_image', methods=['POST'])
 def mark_image():
