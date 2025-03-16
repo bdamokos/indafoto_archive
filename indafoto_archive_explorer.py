@@ -8,6 +8,7 @@ import os
 from datetime import datetime
 import math
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 app = Flask(__name__)
 
@@ -20,6 +21,42 @@ def get_db():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row  # This enables column access by name
     return conn
+
+def get_archive_url(archive_url, original_url):
+    """Handle special case of archive.ph submission URLs.
+    
+    Args:
+        archive_url: The URL from the database (may be a submission URL)
+        original_url: The original URL that was archived
+        
+    Returns:
+        The actual archive URL to use
+    """
+    if not archive_url:
+        return None
+        
+    # If it's just the archive.ph submission URL without parameters
+    if archive_url == 'https://archive.ph/submit/':
+        # Use the original URL to construct the archive URL
+        return f'https://archive.ph/{original_url}'
+        
+    # If it's an archive.ph submission URL with parameters
+    if archive_url.startswith('https://archive.ph/submit'):
+        # Extract the original URL from the submission URL
+        try:
+            # The submission URL format is: https://archive.ph/submit?url=ORIGINAL_URL
+            parsed = urlparse(archive_url)
+            query_params = parse_qs(parsed.query)
+            if 'url' in query_params:
+                original_url = query_params['url'][0]
+        except:
+            # If we can't parse the submission URL, use the provided original_url
+            pass
+            
+        # Construct the actual archive URL
+        return f'https://archive.ph/{original_url}'
+        
+    return archive_url
 
 def init_db():
     """Initialize the database with additional tables needed for the explorer."""
@@ -239,6 +276,37 @@ def view_image(image_id):
     """, (image_id,))
     marked = cursor.fetchone()
     
+    # Get archive information for the image page
+    cursor.execute("""
+        SELECT archive_url, status, submission_date
+        FROM archive_submissions
+        WHERE url = ? AND type = 'image_page'
+        ORDER BY submission_date DESC
+        LIMIT 1
+    """, (image['page_url'],))
+    image_archive = cursor.fetchone()
+    
+    # Get archive information for the author page
+    author_archive = None
+    if image['author_url']:
+        cursor.execute("""
+            SELECT archive_url, status, submission_date
+            FROM archive_submissions
+            WHERE url = ? AND type = 'author_page'
+            ORDER BY submission_date DESC
+            LIMIT 1
+        """, (image['author_url'],))
+        author_archive = cursor.fetchone()
+    
+    # Process archive URLs to handle submission URLs
+    if image_archive:
+        image_archive = dict(image_archive)
+        image_archive['archive_url'] = get_archive_url(image_archive['archive_url'], image['page_url'])
+    
+    if author_archive:
+        author_archive = dict(author_archive)
+        author_archive['archive_url'] = get_archive_url(author_archive['archive_url'], image['author_url'])
+    
     conn.close()
     
     return render_template('image.html',
@@ -246,7 +314,9 @@ def view_image(image_id):
                          collections=collections,
                          albums=albums,
                          tags=tags,
-                         marked=marked)
+                         marked=marked,
+                         image_archive=image_archive,
+                         author_archive=author_archive)
 
 @app.route('/api/mark_image', methods=['POST'])
 def mark_image():
@@ -283,6 +353,14 @@ def serve_image(image_path):
     """Serve image files."""
     try:
         return send_file(image_path)
+    except Exception as e:
+        abort(404)
+
+@app.route('/static/<path:filename>')
+def serve_static(filename):
+    """Serve static files."""
+    try:
+        return send_file(f'static/{filename}')
     except Exception as e:
         abort(404)
 
