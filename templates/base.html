@@ -167,7 +167,7 @@
 
         // Function to save a note for an image
         function saveNote(imageId) {
-            const noteText = document.getElementById(`note-${imageId}`).value;
+            const noteText = document.getElementById('note-text').value;
             
             fetch('/api/image_note', {
                 method: 'POST',
@@ -183,13 +183,14 @@
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
-                    const noteDisplay = document.getElementById(`note-display-${imageId}`);
-                    if (noteDisplay) {
-                        noteDisplay.textContent = noteText;
-                    }
+                    // Reload the page to show updated note info
+                    location.reload();
                 }
             })
-            .catch(error => console.error('Error:', error));
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Failed to save note. Please try again.');
+            });
         }
 
         // Function to delete a note for an image
@@ -211,17 +212,14 @@
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
-                    const noteDisplay = document.getElementById(`note-display-${imageId}`);
-                    const noteInput = document.getElementById(`note-${imageId}`);
-                    if (noteDisplay) {
-                        noteDisplay.textContent = '';
-                    }
-                    if (noteInput) {
-                        noteInput.value = '';
-                    }
+                    // Reload the page to show updated state
+                    location.reload();
                 }
             })
-            .catch(error => console.error('Error:', error));
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Failed to delete note. Please try again.');
+            });
         }
     </script>
     {% block scripts %}{% endblock %}

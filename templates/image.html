@@ -30,9 +30,18 @@
                 {% if marked %}
                 <div class="alert alert-warning">
                     <h6>Marked as Important</h6>
-                    {% if marked.note %}
-                    <p class="mb-0"><small>Note: {{ marked.note }}</small></p>
-                    {% endif %}
+                    <div class="note-section mb-2">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <textarea id="note-text" class="form-control mb-2" rows="3" placeholder="Add a note about this image...">{{ note.note if note else '' }}</textarea>
+                        </div>
+                        <button class="btn btn-sm btn-primary" onclick="saveNote({{ image.id }})">Save Note</button>
+                        {% if note %}
+                            <button class="btn btn-sm btn-danger" onclick="deleteNote({{ image.id }})">Delete Note</button>
+                            <small class="d-block text-muted mt-1">
+                                Last updated: {{ note.updated_date }}
+                            </small>
+                        {% endif %}
+                    </div>
                     <small class="text-muted">Marked on: {{ marked.marked_date }}</small>
                 </div>
                 {% endif %}
