@@ -97,6 +97,19 @@ If you don't have Python installed:
 
 ### Running the Tools
 
+#### Archive Submitter
+
+The archive submitter should be run as a separate process from the crawler:
+
+```bash
+# Start the archive submitter in one terminal:
+python archive_submitter.py
+
+# Start the crawler in another terminal:
+python indafoto.py
+```
+
+
 #### Crawler Usage
 
 1. Make sure your virtual environment is activated (you should see `(venv)` in your command prompt)
@@ -117,14 +130,13 @@ If you don't have Python installed:
 2. Available command-line arguments:
    ```
    python indafoto.py --start-offset N  # Start crawling from page N
-   python indafoto.py --disable-archive  # Disable Internet Archive / Archive.ph submissions (enabled by default)
    python indafoto.py --retry           # Retry previously failed pages
    python indafoto.py --test            # Run test function for album extraction
    ```
 
    You can combine arguments:
    ```
-   python indafoto.py --start-offset 100 --disable-archive
+   python indafoto.py --start-offset 100
    ```
 
 #### Archive Explorer Usage
@@ -160,7 +172,7 @@ If you don't have Python installed:
 - Downloads images and their metadata (title, author, license, camera info, etc.)
 - Organizes images in author-based folders
 - Calculates and stores SHA-256 hashes of downloaded images
-- Internet Archive submission of author pages and a sample of the image pages (enabled by default). The point is to use it as future proof of provenance of the images. The script verifies if a page has already been archived before submitting it again.
+- Records URLs for archival in a database, which is processed by a separate archive submitter process
 - Rate limiting to avoid overloading the server
 - Smart resume capability:
   - Can restart from any page using --start-offset
@@ -168,6 +180,15 @@ If you don't have Python installed:
   - Tracks failed pages for later retry
   - Limits retry attempts to prevent infinite loops
 - Detailed logging of all operations
+
+#### Archive Submitter Features
+
+- Runs as an independent process for better reliability
+- Monitors the database for new URLs to archive
+- Submits pages to both Internet Archive and archive.ph
+- Verifies successful archival before marking as complete
+- Implements retry logic for failed submissions
+- Maintains its own log file for tracking archival operations
 
 #### Archive Explorer Features
 
@@ -217,7 +238,7 @@ The crawler includes several error handling features:
 - The crawler includes rate limiting to avoid overloading the server
 - Downloaded images are organized in folders to prevent having too many files in a single directory
 - A log file "indafoto_crawler.log" will be created to track the script's progress
-- Internet Archive submission is enabled by default and can be disabled with --disable-archive flag
+- The archive submitter runs as a separate process and maintains its own log file "archive_submitter.log"
 - Failed pages are tracked and can be retried later
 - The Archive Explorer requires Flask to be installed (`pip install flask`)
 - Always run the tools with the virtual environment activated to ensure all dependencies are available
