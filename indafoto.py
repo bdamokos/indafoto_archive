@@ -75,7 +75,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS images (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         uuid TEXT UNIQUE,
-        url TEXT UNIQUE,
+        url TEXT,
         local_path TEXT,
         sha256_hash TEXT,
         title TEXT,
@@ -83,13 +83,18 @@ def init_db():
         author_url TEXT,
         license TEXT,
         camera_make TEXT,
-        camera_model TEXT,  -- New column for camera model
+        camera_model TEXT,
         focal_length TEXT,
         aperture TEXT,
         shutter_speed TEXT,
         taken_date TEXT,
         page_url TEXT
     )
+    """)
+    
+    # Create index on url for faster lookups
+    cursor.execute("""
+    CREATE INDEX IF NOT EXISTS idx_images_url ON images(url)
     """)
     
     # Add camera_model column if it doesn't exist (for backwards compatibility)
@@ -191,6 +196,16 @@ def init_db():
         attempts INTEGER DEFAULT 1,
         last_attempt TEXT,
         status TEXT DEFAULT 'pending'  -- 'pending', 'retried', 'success', 'failed'
+    )
+    """)
+    
+    # Create completed_pages table to track successfully processed pages
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS completed_pages (
+        page_number INTEGER PRIMARY KEY,
+        completion_date TEXT,
+        image_count INTEGER,
+        total_size_bytes INTEGER
     )
     """)
     
@@ -997,174 +1012,192 @@ def retry_failed_pages(conn, cursor):
             """, (datetime.now().isoformat(), str(e), page_number))
             conn.commit()
 
-def process_image_list(image_data_list, conn, cursor, archive_queue=None, attempt=1):
-    """Process a list of images, returns True if all images were processed successfully."""
-    if not image_data_list:
-        return True
-        
-    success = True
-    # Track authors and their image counts for archive sampling
+def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
+    """Process a list of images, downloading them and saving metadata to the database.
+    
+    Returns:
+        tuple: (success, stats) where:
+            - success (bool): True if all images were processed successfully
+            - stats (dict): Statistics about the processing including:
+                - processed_count: Number of images processed
+                - failed_count: Number of images that failed
+                - author_counts: Dictionary of images per author
+    """
     author_image_counts = {}
-    
-    # Create a list to store download tasks
     download_tasks = []
+    processed_count = 0
+    failed_count = 0
     
-    # First pass: collect metadata and validate URLs
-    for image_data in image_data_list:
-        try:
-            image_url = image_data['image_url']
-            photo_page_url = image_data['page_url']
-            
-            # Generate UUID for the image using the actual image ID
-            image_uuid = f"indafoto_{extract_image_id(photo_page_url)}"
-            
-            # Check if already processed
-            cursor.execute("SELECT 1 FROM images WHERE uuid=?", (image_uuid,))
-            if cursor.fetchone():
+    try:
+        # First pass: collect download tasks and check for duplicates
+        for image_data in image_data_list:
+            try:
+                page_url = image_data.get('page_url')
+                if not page_url:
+                    logger.warning("Skipping image with no page URL")
+                    failed_count += 1
+                    continue
+                    
+                # Extract metadata and prepare download task
+                metadata = extract_metadata(page_url)
+                if not metadata:
+                    logger.warning(f"Failed to extract metadata from {page_url}")
+                    failed_count += 1
+                    continue
+                
+                # Get image URL from metadata or image_data
+                url = image_data.get('image_url')
+                if not url:
+                    logger.warning(f"No image URL found for {page_url}")
+                    failed_count += 1
+                    continue
+                
+                # Check if image already exists by URL
+                cursor.execute("SELECT id FROM images WHERE url = ?", (url,))
+                if cursor.fetchone():
+                    logger.info(f"Image with URL {url} already exists, skipping...")
+                    processed_count += 1
+                    continue
+                
+                # Try to get high-res version URL
+                high_res_url = get_high_res_url(url)
+                download_url = high_res_url if high_res_url else url
+                
+                # Add to download tasks
+                download_tasks.append((download_url, metadata))
+                
+                # Update author count
+                author = metadata.get('author', 'unknown')
+                author_image_counts[author] = author_image_counts.get(author, 0) + 1
+                
+            except Exception as e:
+                logger.error(f"Error preparing download task: {e}")
+                failed_count += 1
                 continue
-
-            # Pass attempt number to extract_metadata for progressive timeout
-            metadata = extract_metadata(photo_page_url, attempt=attempt)
-            if not metadata:
-                success = False
-                continue
-
-            # Try to get high-res version of the image
-            download_url = image_url
-            if '_l.jpg' in image_url:
-                for res in ['_xxl.jpg', '_xl.jpg']:
-                    test_url = image_url.replace('_l.jpg', res)
-                    try:
-                        head_response = requests.head(test_url, headers=HEADERS, timeout=5)
-                        if head_response.ok:
-                            download_url = test_url
-                            break
-                    except:
-                        continue
-                        
-            # Add to download tasks
-            download_tasks.append({
-                'url': download_url,
-                'author': metadata['author'],
-                'metadata': metadata,
-                'uuid': image_uuid
-            })
-
-        except Exception as e:
-            logger.error(f"Error processing image {image_url}: {e}")
-            success = False
-            continue
-    
-    # Second pass: parallel downloads and database updates
-    if download_tasks:
+        
+        # Second pass: parallel download and process
         with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
-            # Start downloads with a timeout
-            future_to_task = {}
-            for task in download_tasks:
-                future = executor.submit(download_image, task['url'], task['author'])
-                future_to_task[future] = task
+            future_to_task = {
+                executor.submit(download_image, url, metadata['author']): (url, metadata)
+                for url, metadata in download_tasks
+            }
             
-            # Process completed downloads with timeout
             for future in concurrent.futures.as_completed(future_to_task):
-                task = future_to_task[future]
+                url, metadata = future_to_task[future]
                 try:
-                    # Get download result with timeout
-                    download_result = future.result(timeout=300)  # 5 minute timeout
-                    if not download_result[0]:  # If filename is None
-                        success = False
-                        continue
+                    local_path, file_hash = future.result()
+                    if local_path and file_hash:
+                        # Double check for duplicates before insertion
+                        cursor.execute("SELECT id FROM images WHERE url = ?", (url,))
+                        if cursor.fetchone():
+                            logger.warning(f"Duplicate detected during insertion for URL {url}, skipping...")
+                            processed_count += 1
+                            continue
                         
-                    local_path, file_hash = download_result
-                    if not local_path or not file_hash:  # Double check we have valid results
-                        success = False
-                        continue
-                        
-                    metadata = task['metadata']
-                    image_uuid = task['uuid']
-
-                    # Now that we have a successful download, insert into database
-                    cursor.execute("""
-                        INSERT INTO images (
-                            uuid, url, local_path, sha256_hash, title, author, author_url,
-                            license, camera_make, camera_model, focal_length, aperture,
-                            shutter_speed, taken_date, page_url
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        image_uuid, task['url'], local_path, file_hash, metadata['title'],
-                        metadata['author'], metadata['author_url'], metadata['license'],
-                        metadata['camera_make'], metadata['camera_model'], metadata['focal_length'],
-                        metadata['aperture'], metadata['shutter_speed'],
-                        metadata['taken_date'], metadata['page_url']
-                    ))
-
-                    # Process galleries
-                    for gallery in metadata['collections']:
+                        # Insert image data
                         cursor.execute("""
-                            INSERT OR IGNORE INTO collections (collection_id, title, url, is_public)
-                            VALUES (?, ?, ?, ?)
-                        """, (gallery['id'], gallery['title'], gallery['url'], gallery['is_public']))
+                            INSERT INTO images (url, local_path, sha256_hash, title, author, 
+                                             author_url, license, camera_make, camera_model, 
+                                             focal_length, aperture, shutter_speed, taken_date, 
+                                             page_url)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            url,
+                            local_path,
+                            file_hash,
+                            metadata.get('title'),
+                            metadata.get('author'),
+                            metadata.get('author_url'),
+                            metadata.get('license'),
+                            metadata.get('camera_make'),
+                            metadata.get('camera_model'),
+                            metadata.get('focal_length'),
+                            metadata.get('aperture'),
+                            metadata.get('shutter_speed'),
+                            metadata.get('taken_date'),
+                            metadata.get('page_url')
+                        ))
                         
-                        cursor.execute("SELECT id FROM collections WHERE collection_id = ?", (gallery['id'],))
-                        gallery_db_id = cursor.fetchone()[0]
+                        image_id = cursor.lastrowid
                         
-                        cursor.execute("""
-                            INSERT INTO image_collections (image_id, collection_id)
-                            VALUES ((SELECT id FROM images WHERE uuid = ?), ?)
-                        """, (image_uuid, gallery_db_id))
-
-                    for gallery in metadata['albums']:
-                        cursor.execute("""
-                            INSERT OR IGNORE INTO albums (album_id, title, url, is_public)
-                            VALUES (?, ?, ?, ?)
-                        """, (gallery['id'], gallery['title'], gallery['url'], gallery['is_public']))
+                        # Process collections
+                        for gallery in metadata.get('collections', []):
+                            cursor.execute("""
+                                INSERT OR IGNORE INTO collections (collection_id, title, url, is_public)
+                                VALUES (?, ?, ?, ?)
+                            """, (gallery['id'], gallery['title'], gallery['url'], gallery['is_public']))
+                            
+                            cursor.execute("SELECT id FROM collections WHERE collection_id = ?", (gallery['id'],))
+                            gallery_db_id = cursor.fetchone()[0]
+                            
+                            cursor.execute("""
+                                INSERT INTO image_collections (image_id, collection_id)
+                                VALUES (?, ?)
+                            """, (image_id, gallery_db_id))
                         
-                        cursor.execute("SELECT id FROM albums WHERE album_id = ?", (gallery['id'],))
-                        gallery_db_id = cursor.fetchone()[0]
+                        # Process albums
+                        for gallery in metadata.get('albums', []):
+                            cursor.execute("""
+                                INSERT OR IGNORE INTO albums (album_id, title, url, is_public)
+                                VALUES (?, ?, ?, ?)
+                            """, (gallery['id'], gallery['title'], gallery['url'], gallery['is_public']))
+                            
+                            cursor.execute("SELECT id FROM albums WHERE album_id = ?", (gallery['id'],))
+                            gallery_db_id = cursor.fetchone()[0]
+                            
+                            cursor.execute("""
+                                INSERT INTO image_albums (image_id, album_id)
+                                VALUES (?, ?)
+                            """, (image_id, gallery_db_id))
                         
-                        cursor.execute("""
-                            INSERT INTO image_albums (image_id, album_id)
-                            VALUES ((SELECT id FROM images WHERE uuid = ?), ?)
-                        """, (image_uuid, gallery_db_id))
-
-                    # Process tags
-                    for tag in metadata.get('tags', []):
-                        cursor.execute("""
-                            INSERT OR IGNORE INTO tags (name, count)
-                            VALUES (?, ?)
-                        """, (tag['name'], tag['count']))
+                        # Process tags
+                        for tag in metadata.get('tags', []):
+                            cursor.execute("""
+                                INSERT OR IGNORE INTO tags (name, count)
+                                VALUES (?, ?)
+                            """, (tag['name'], tag['count']))
+                            
+                            cursor.execute("SELECT id FROM tags WHERE name = ?", (tag['name'],))
+                            tag_db_id = cursor.fetchone()[0]
+                            
+                            cursor.execute("""
+                                INSERT INTO image_tags (image_id, tag_id)
+                                VALUES (?, ?)
+                            """, (image_id, tag_db_id))
                         
-                        cursor.execute("SELECT id FROM tags WHERE name = ?", (tag['name'],))
-                        tag_db_id = cursor.fetchone()[0]
+                        conn.commit()
+                        processed_count += 1
+                    else:
+                        logger.warning(f"Failed to download image from {url}")
+                        failed_count += 1
                         
-                        cursor.execute("""
-                            INSERT INTO image_tags (image_id, tag_id)
-                            VALUES ((SELECT id FROM images WHERE uuid = ?), ?)
-                        """, (image_uuid, tag_db_id))
-
-                    conn.commit()
-
-                    # Handle Internet Archive submissions if enabled
-                    if archive_queue:
-                        author = metadata['author']
-                        author_image_counts[author] = author_image_counts.get(author, 0) + 1
-                        
-                        if author_image_counts[author] == 1 and metadata['author_url']:
-                            author_url = metadata['author_url']
-                            archive_queue.put((author_url, 'author_page'))
-                            author_details_url = author_url + "/details"
-                            archive_queue.put((author_details_url, 'author_details'))
-                        
-                        if author_image_counts[author] == 1 or random.random() < ARCHIVE_SAMPLE_RATE:
-                            archive_queue.put((metadata['page_url'], 'image_page'))
-
-                except concurrent.futures.TimeoutError:
-                    logger.error(f"Download timed out for {task['url']}")
-                    success = False
                 except Exception as e:
-                    logger.error(f"Error processing downloaded image {task['url']}: {e}")
-                    success = False
-            
-    return success
+                    logger.error(f"Error processing downloaded image {url}: {str(e)}")
+                    failed_count += 1
+                    continue
+        
+        # Return success if we processed all images (allowing for duplicates)
+        total_images = len(image_data_list)
+        success = (processed_count + failed_count) == total_images and failed_count == 0
+        
+        stats = {
+            'processed_count': processed_count,
+            'failed_count': failed_count,
+            'total_images': total_images,
+            'author_counts': author_image_counts
+        }
+        
+        return success, stats
+        
+    except Exception as e:
+        logger.error(f"Error in process_image_list: {str(e)}")
+        return False, {
+            'processed_count': processed_count,
+            'failed_count': failed_count + len(image_data_list) - processed_count,
+            'total_images': len(image_data_list),
+            'author_counts': author_image_counts,
+            'error': str(e)
+        }
 
 def get_free_space_gb(path):
     """Return free space in GB for the given path."""
@@ -1217,6 +1250,12 @@ def crawl_images(start_offset=0, enable_archive=False, retry_mode=False):
     try:
         for page in tqdm(range(start_offset, TOTAL_PAGES), desc="Crawling pages"):
             try:
+                # Check if page was already successfully completed
+                cursor.execute("SELECT completion_date FROM completed_pages WHERE page_number = ?", (page,))
+                if cursor.fetchone():
+                    logger.info(f"Skipping page {page} - already completed successfully")
+                    continue
+                
                 # Check disk space before each page
                 free_space_gb = get_free_space_gb(BASE_DIR)
                 if free_space_gb < 2:
@@ -1224,33 +1263,55 @@ def crawl_images(start_offset=0, enable_archive=False, retry_mode=False):
                 
                 search_page_url = SEARCH_URL_TEMPLATE.format(page)
                 
-                # Skip if we've already successfully processed this page
-                cursor.execute("""
-                    SELECT status FROM failed_pages 
-                    WHERE page_number = ? AND status = 'success'
-                """, (page,))
-                if cursor.fetchone():
-                    continue
-                
                 # Track page size before downloading
                 page_size_before = sum(f.stat().st_size for f in Path(BASE_DIR).rglob('*') if f.is_file())
                 
                 image_data_list = get_image_links(search_page_url, attempt=1)
                 
-                if not process_image_list(image_data_list, conn, cursor, archive_queue, attempt=1):
-                    # If processing wasn't completely successful, add to failed_pages
-                    cursor.execute("""
-                        INSERT OR REPLACE INTO failed_pages (
-                            page_number, url, last_attempt, status
-                        ) VALUES (?, ?, ?, 'pending')
-                    """, (page, search_page_url, datetime.now().isoformat()))
-                    conn.commit()
+                # Process the image list
+                success, stats = process_image_list(image_data_list, conn, cursor)
                 
                 # Calculate space used by this page
                 page_size_after = sum(f.stat().st_size for f in Path(BASE_DIR).rglob('*') if f.is_file())
                 page_downloaded_bytes = page_size_after - page_size_before
                 total_downloaded_bytes += page_downloaded_bytes
                 pages_processed += 1
+                
+                if success:
+                    # Record successful completion
+                    cursor.execute("""
+                        INSERT INTO completed_pages (
+                            page_number, completion_date, image_count, total_size_bytes
+                        ) VALUES (?, ?, ?, ?)
+                    """, (
+                        page,
+                        datetime.now().isoformat(),
+                        stats['total_images'],
+                        page_downloaded_bytes
+                    ))
+                    conn.commit()
+                    
+                    # Remove from failed_pages if it was there
+                    cursor.execute("DELETE FROM failed_pages WHERE page_number = ?", (page,))
+                    conn.commit()
+                    
+                    logger.info(f"Successfully completed page {page} - "
+                              f"Processed: {stats['processed_count']}, "
+                              f"Failed: {stats['failed_count']}, "
+                              f"Total: {stats['total_images']}")
+                else:
+                    # If processing wasn't completely successful, add to failed_pages
+                    error_msg = stats.get('error', 'Unknown error')
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO failed_pages (
+                            page_number, url, error, last_attempt, status
+                        ) VALUES (?, ?, ?, ?, 'pending')
+                    """, (page, search_page_url, error_msg, datetime.now().isoformat()))
+                    conn.commit()
+                    logger.warning(f"Failed to process all images on page {page} - "
+                                 f"Processed: {stats['processed_count']}, "
+                                 f"Failed: {stats['failed_count']}, "
+                                 f"Total: {stats['total_images']}")
                 
                 # Estimate space requirements
                 if pages_processed % 10 == 0:  # Check every 10 pages
@@ -1296,6 +1357,17 @@ def crawl_images(start_offset=0, enable_archive=False, retry_mode=False):
         if enable_archive and archive_worker:
             archive_queue.put((None, None))
             archive_worker.join()
+        
+        # Print summary of progress
+        cursor.execute("SELECT COUNT(*) FROM completed_pages")
+        completed_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM failed_pages WHERE status = 'pending'")
+        pending_count = cursor.fetchone()[0]
+        
+        logger.info("\nCrawling Summary:")
+        logger.info(f"Total pages completed: {completed_count}")
+        logger.info(f"Pages pending retry: {pending_count}")
+        logger.info(f"Total pages processed this run: {pages_processed}")
         
         conn.close()
         logger.info("Crawler finished, database connection closed")
@@ -1501,7 +1573,7 @@ def redownload_author_images(author_name):
                         INSERT INTO image_collections (image_id, collection_id)
                         VALUES (?, ?)
                     """, (new_image_id, gallery_db_id))
-                
+
                 for gallery in metadata['albums']:
                     cursor.execute("""
                         INSERT OR IGNORE INTO albums (album_id, title, url, is_public)
@@ -1555,6 +1627,22 @@ def redownload_author_images(author_name):
     logger.info(f"Failed: {failed}")
     
     conn.close()
+
+def get_high_res_url(url):
+    """Try to get the highest resolution version of an image URL."""
+    if '_l.jpg' not in url:
+        return url
+        
+    for res in ['_xxl.jpg', '_xl.jpg']:
+        test_url = url.replace('_l.jpg', res)
+        try:
+            head_response = requests.head(test_url, headers=HEADERS, timeout=5)
+            if head_response.ok:
+                return test_url
+        except:
+            continue
+            
+    return url
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Indafoto Crawler')
