@@ -338,11 +338,41 @@ def init_db():
     CREATE TABLE IF NOT EXISTS marked_images (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         image_id INTEGER,
-        note TEXT,
         marked_date TEXT,
         FOREIGN KEY (image_id) REFERENCES images (id)
     )
     """)
+    
+    # Create table for image notes
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS image_notes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        image_id INTEGER,
+        note TEXT,
+        created_date TEXT,
+        updated_date TEXT,
+        FOREIGN KEY (image_id) REFERENCES images (id)
+    )
+    """)
+    
+    # Migrate existing notes to the new table
+    try:
+        cursor.execute("""
+            INSERT INTO image_notes (image_id, note, created_date, updated_date)
+            SELECT image_id, note, marked_date, marked_date
+            FROM marked_images
+            WHERE note IS NOT NULL AND note != ''
+        """)
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # Table might not exist yet
+    
+    # Remove note column from marked_images if it exists
+    try:
+        cursor.execute("ALTER TABLE marked_images DROP COLUMN note")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # Column might not exist
     
     conn.commit()
     conn.close()
@@ -415,8 +445,12 @@ def browse_images():
     
     # Build the query based on filters
     query = """
-        SELECT DISTINCT i.* 
+        SELECT DISTINCT i.*, 
+               CASE WHEN m.id IS NOT NULL THEN 1 ELSE 0 END as is_marked,
+               n.note, n.created_date as note_created_date, n.updated_date as note_updated_date
         FROM images i
+        LEFT JOIN marked_images m ON i.id = m.image_id
+        LEFT JOIN image_notes n ON i.id = n.image_id
     """
     params = []
     where_clauses = []
@@ -450,7 +484,7 @@ def browse_images():
         params.append(author)
     
     if marked:
-        query += " JOIN marked_images mi ON i.id = mi.image_id"
+        where_clauses.append("m.id IS NOT NULL")
     
     if where_clauses:
         query += " WHERE " + " AND ".join(where_clauses)
@@ -539,12 +573,21 @@ def view_image(image_id):
     """, (image_id,))
     tags = cursor.fetchall()
     
-    # Get marked status and note
+    # Get marked status
     cursor.execute("""
-        SELECT * FROM marked_images
+        SELECT marked_date
+        FROM marked_images
         WHERE image_id = ?
     """, (image_id,))
     marked = cursor.fetchone()
+    
+    # Get note if exists
+    cursor.execute("""
+        SELECT note, created_date, updated_date
+        FROM image_notes
+        WHERE image_id = ?
+    """, (image_id,))
+    note = cursor.fetchone()
     
     # Get archive information for the image page
     cursor.execute("""
@@ -585,6 +628,7 @@ def view_image(image_id):
                          albums=albums,
                          tags=tags,
                          marked=marked,
+                         note=note,
                          image_archive=image_archive,
                          author_archive=author_archive)
 
@@ -593,10 +637,9 @@ def mark_image():
     """API endpoint to mark/unmark an image as important."""
     data = request.get_json()
     image_id = data.get('image_id')
-    note = data.get('note', '')
     marked = data.get('marked', True)
     
-    logger.info(f"Marking image {image_id} with note: {note}, marked: {marked}")
+    logger.info(f"Marking image {image_id}, marked: {marked}")
     
     if not image_id:
         return jsonify({'error': 'Image ID is required'}), 400
@@ -606,14 +649,14 @@ def mark_image():
     
     try:
         if marked:
-            logger.info(f"Inserting/updating marked_images record for image {image_id}")
+            logger.info(f"Inserting marked_images record for image {image_id}")
             # First delete any existing records for this image
             cursor.execute("DELETE FROM marked_images WHERE image_id = ?", (image_id,))
             # Then insert the new record
             cursor.execute("""
-                INSERT INTO marked_images (image_id, note, marked_date)
-                VALUES (?, ?, ?)
-            """, (image_id, note, datetime.now().isoformat()))
+                INSERT INTO marked_images (image_id, marked_date)
+                VALUES (?, ?)
+            """, (image_id, datetime.now().isoformat()))
             
             # If marking an image and before deletion date, queue for archiving
             if should_archive():
@@ -648,6 +691,76 @@ def mark_image():
         return jsonify({'success': True})
     except Exception as e:
         logger.error(f"Error in mark_image: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route('/api/image_note', methods=['POST'])
+def manage_image_note():
+    """API endpoint to add, update, or delete a note for an image."""
+    data = request.get_json()
+    image_id = data.get('image_id')
+    note = data.get('note', '')
+    action = data.get('action', 'add')  # 'add', 'update', or 'delete'
+    
+    if not image_id:
+        return jsonify({'error': 'Image ID is required'}), 400
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        if action == 'delete':
+            cursor.execute("DELETE FROM image_notes WHERE image_id = ?", (image_id,))
+        else:
+            # Check if note exists
+            cursor.execute("SELECT id FROM image_notes WHERE image_id = ?", (image_id,))
+            existing_note = cursor.fetchone()
+            
+            if existing_note:
+                if action == 'update':
+                    cursor.execute("""
+                        UPDATE image_notes 
+                        SET note = ?, updated_date = ?
+                        WHERE image_id = ?
+                    """, (note, datetime.now().isoformat(), image_id))
+            else:
+                cursor.execute("""
+                    INSERT INTO image_notes (image_id, note, created_date, updated_date)
+                    VALUES (?, ?, ?, ?)
+                """, (image_id, note, datetime.now().isoformat(), datetime.now().isoformat()))
+        
+        conn.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"Error in manage_image_note: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route('/api/image_note/<int:image_id>', methods=['GET'])
+def get_image_note(image_id):
+    """API endpoint to get the note for an image."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute("""
+            SELECT note, created_date, updated_date 
+            FROM image_notes 
+            WHERE image_id = ?
+        """, (image_id,))
+        result = cursor.fetchone()
+        
+        if result:
+            return jsonify({
+                'note': result['note'],
+                'created_date': result['created_date'],
+                'updated_date': result['updated_date']
+            })
+        return jsonify({'note': None})
+    except Exception as e:
+        logger.error(f"Error in get_image_note: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
@@ -763,14 +876,15 @@ def marked_gallery():
     stats['authors_count'] = cursor.fetchone()['count']
     
     # Count of images with notes
-    cursor.execute("SELECT COUNT(*) as count FROM marked_images WHERE note IS NOT NULL AND note != ''")
+    cursor.execute("SELECT COUNT(*) as count FROM image_notes")
     stats['with_notes'] = cursor.fetchone()['count']
     
     # Get marked images with their notes
     cursor.execute("""
-        SELECT i.*, m.note, m.marked_date
+        SELECT i.*, m.marked_date, n.note, n.created_date as note_created_date, n.updated_date as note_updated_date
         FROM images i
         JOIN marked_images m ON i.id = m.image_id
+        LEFT JOIN image_notes n ON i.id = n.image_id
         ORDER BY m.marked_date DESC
     """)
     images = cursor.fetchall()
@@ -895,9 +1009,13 @@ def browse_albums():
         SELECT 
             as1.*,
             i.local_path as thumbnail_path,
-            i.title as thumbnail_title
+            i.title as thumbnail_title,
+            CASE WHEN m.id IS NOT NULL THEN 1 ELSE 0 END as is_marked,
+            n.note, n.created_date as note_created_date, n.updated_date as note_updated_date
         FROM album_stats as1
         LEFT JOIN images i ON as1.first_image_id = i.id
+        LEFT JOIN marked_images m ON i.id = m.image_id
+        LEFT JOIN image_notes n ON i.id = n.image_id
         ORDER BY as1.image_count DESC, as1.title
     """)
     
@@ -937,9 +1055,13 @@ def browse_collections():
         SELECT 
             cs.*,
             i.local_path as thumbnail_path,
-            i.title as thumbnail_title
+            i.title as thumbnail_title,
+            CASE WHEN m.id IS NOT NULL THEN 1 ELSE 0 END as is_marked,
+            n.note, n.created_date as note_created_date, n.updated_date as note_updated_date
         FROM collection_stats cs
         LEFT JOIN images i ON cs.first_image_id = i.id
+        LEFT JOIN marked_images m ON i.id = m.image_id
+        LEFT JOIN image_notes n ON i.id = n.image_id
         ORDER BY cs.image_count DESC, cs.title
     """)
     

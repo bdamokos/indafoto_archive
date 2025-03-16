@@ -28,6 +28,7 @@
             padding: 0.5rem;
             opacity: 0;
             transition: opacity 0.3s;
+            z-index: 1;
         }
         .image-card:hover .image-overlay {
             opacity: 1;
@@ -39,6 +40,7 @@
             background: rgba(255, 215, 0, 0.8);
             padding: 0.25rem 0.5rem;
             border-radius: 0.25rem;
+            z-index: 1000;
         }
         .filter-section {
             background: #f8f9fa;
@@ -55,6 +57,39 @@
         .pagination-container {
             margin-top: 2rem;
             margin-bottom: 2rem;
+        }
+        .star-button {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            z-index: 1000;
+            background: rgba(255, 255, 255, 0.8);
+            border-radius: 50%;
+            padding: 8px;
+            border: none;
+            cursor: pointer;
+            transition: all 0.2s;
+            width: 36px;
+            height: 36px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .star-button:hover {
+            transform: scale(1.1);
+            background: rgba(255, 255, 255, 0.95);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }
+        .star-button i {
+            font-size: 1.2rem;
+            line-height: 1;
+        }
+        .star-button i.far {
+            color: #6c757d;
+        }
+        .star-button i.fas {
+            color: #ffc107;
         }
     </style>
 </head>
@@ -93,7 +128,6 @@
         // Function to mark/unmark an image
         function toggleMark(imageId, element) {
             const isMarked = element.dataset.marked === 'true';
-            const note = isMarked ? '' : prompt('Add a note (optional):');
             
             fetch('/api/mark_image', {
                 method: 'POST',
@@ -102,21 +136,88 @@
                 },
                 body: JSON.stringify({
                     image_id: imageId,
-                    marked: !isMarked,
-                    note: note
+                    marked: !isMarked
                 })
             })
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
                     element.dataset.marked = (!isMarked).toString();
-                    element.innerHTML = !isMarked ? 
-                        '<i class="fas fa-star text-warning"></i>' :
-                        '<i class="far fa-star"></i>';
+                    const star = element.querySelector('i');
+                    if (star) {
+                        if (!isMarked) {
+                            star.classList.remove('far');
+                            star.classList.add('fas');
+                            star.style.color = '#ffc107';
+                        } else {
+                            star.classList.remove('fas');
+                            star.classList.add('far');
+                            star.style.color = '#6c757d';
+                        }
+                    }
                     
                     const badge = document.querySelector(`#marked-badge-${imageId}`);
                     if (badge) {
                         badge.style.display = !isMarked ? 'block' : 'none';
+                    }
+                }
+            })
+            .catch(error => console.error('Error:', error));
+        }
+
+        // Function to save a note for an image
+        function saveNote(imageId) {
+            const noteText = document.getElementById(`note-${imageId}`).value;
+            
+            fetch('/api/image_note', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    image_id: imageId,
+                    note: noteText,
+                    action: 'update'
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    const noteDisplay = document.getElementById(`note-display-${imageId}`);
+                    if (noteDisplay) {
+                        noteDisplay.textContent = noteText;
+                    }
+                }
+            })
+            .catch(error => console.error('Error:', error));
+        }
+
+        // Function to delete a note for an image
+        function deleteNote(imageId) {
+            if (!confirm('Are you sure you want to delete this note?')) {
+                return;
+            }
+            
+            fetch('/api/image_note', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    image_id: imageId,
+                    action: 'delete'
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    const noteDisplay = document.getElementById(`note-display-${imageId}`);
+                    const noteInput = document.getElementById(`note-${imageId}`);
+                    if (noteDisplay) {
+                        noteDisplay.textContent = '';
+                    }
+                    if (noteInput) {
+                        noteInput.value = '';
                     }
                 }
             })

@@ -23,7 +23,7 @@
                 <button class="btn btn-link p-0" 
                         onclick="toggleMark({{ image.id }}, this)"
                         data-marked="{{ marked is not none }}">
-                    <i class="fa{{ 's' if marked else 'r' }} fa-star fa-lg"></i>
+                    <i class="fa{{ 's' if marked else 'r' }} fa-star fa-lg" style="color: {{ 'gold' if marked else '#6c757d' }};"></i>
                 </button>
             </div>
             <div class="card-body">
