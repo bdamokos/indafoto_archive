@@ -27,6 +27,33 @@ If you need to download it from GitHub:
 3. Select "Download ZIP"
 4. Extract the ZIP file to a folder on your computer
 
+##### Alternative: Using Git
+
+<details>
+<summary>Click to expand: Using Git for installation and updates</summary>
+
+If you're familiar with Git, you can clone the repository directly:
+
+1. If you don't have Git installed, download and install it from [git-scm.com](https://git-scm.com/downloads)
+
+2. Open a command prompt or terminal
+
+3. Run the following command:
+   ```
+   git clone https://github.com/bdamokos/indafoto_archive.git
+   cd indafoto_archive
+   ```
+
+This method has the advantage of making updates easier. When new features or fixes are available, you can update your local copy by running:
+   ```
+   git pull
+   ```
+
+The `git pull` command fetches changes from the remote repository and automatically merges them into your local copy, ensuring you always have the latest version without needing to download the entire project again.
+</details>
+
+
+
 #### Step 2: Install Python
 
 If you don't have Python installed:
