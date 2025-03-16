@@ -87,5 +87,60 @@
         </div>
         {% endfor %}
     </div>
+
+    {% if total_pages > 1 %}
+    <div class="pagination-container">
+        <nav>
+            <ul class="pagination justify-content-center">
+                {% if page > 1 %}
+                <li class="page-item">
+                    <a class="page-link" href="{{ request.path }}?page={{ page - 1 }}&{{ request.query_string|replace('page=' ~ page, '')|replace('&&', '&')|replace('?&', '?') }}">Previous</a>
+                </li>
+                {% endif %}
+                
+                {# First page #}
+                <li class="page-item {{ 'active' if page == 1 else '' }}">
+                    <a class="page-link" href="{{ request.path }}?page=1&{{ request.query_string|replace('page=' ~ page, '')|replace('&&', '&')|replace('?&', '?') }}">1</a>
+                </li>
+                
+                {# Ellipsis after first page if needed #}
+                {% if page - 2 > 2 %}
+                <li class="page-item disabled">
+                    <span class="page-link">...</span>
+                </li>
+                {% endif %}
+                
+                {# Pages around current page #}
+                {% for p in range(max(2, page - 2), min(total_pages, page + 3)) %}
+                {% if p > 1 and p < total_pages %}
+                <li class="page-item {{ 'active' if p == page else '' }}">
+                    <a class="page-link" href="{{ request.path }}?page={{ p }}&{{ request.query_string|replace('page=' ~ page, '')|replace('&&', '&')|replace('?&', '?') }}">{{ p }}</a>
+                </li>
+                {% endif %}
+                {% endfor %}
+                
+                {# Ellipsis before last page if needed #}
+                {% if page + 2 < total_pages - 1 %}
+                <li class="page-item disabled">
+                    <span class="page-link">...</span>
+                </li>
+                {% endif %}
+                
+                {# Last page #}
+                {% if total_pages > 1 %}
+                <li class="page-item {{ 'active' if page == total_pages else '' }}">
+                    <a class="page-link" href="{{ request.path }}?page={{ total_pages }}&{{ request.query_string|replace('page=' ~ page, '')|replace('&&', '&')|replace('?&', '?') }}">{{ total_pages }}</a>
+                </li>
+                {% endif %}
+                
+                {% if page < total_pages %}
+                <li class="page-item">
+                    <a class="page-link" href="{{ request.path }}?page={{ page + 1 }}&{{ request.query_string|replace('page=' ~ page, '')|replace('&&', '&')|replace('?&', '?') }}">Next</a>
+                </li>
+                {% endif %}
+            </ul>
+        </nav>
+    </div>
+    {% endif %}
 </div>
 {% endblock %} 
