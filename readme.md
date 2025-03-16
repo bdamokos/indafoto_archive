@@ -67,7 +67,7 @@ If you don't have Python installed:
 2. Available command-line arguments:
    ```
    python indafoto.py --start-offset N  # Start crawling from page N
-   python indafoto.py --enable-archive  # Enable Internet Archive submissions
+   python indafoto.py --enable-archive  # Enable Internet Archive / Archive.ph submissions
    python indafoto.py --retry           # Retry previously failed pages
    python indafoto.py --test            # Run test function for album extraction
    ```
