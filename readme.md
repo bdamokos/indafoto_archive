@@ -77,7 +77,20 @@ If you don't have Python installed:
    ```
    (Replace "path/to/indafoto_archive" with the actual path to where you extracted the files)
 
-3. Install the required packages:
+3. Create and activate a virtual environment (recommended):
+   ```
+   # On Windows:
+   python -m venv venv
+   venv\Scripts\activate
+
+   # On macOS/Linux:
+   python3 -m venv venv
+   source venv/bin/activate
+   ```
+
+   Note: If you see `(venv)` at the start of your command prompt, the virtual environment is activated correctly.
+
+4. Install the required packages:
    ```
    pip install -r requirements.txt
    ```
@@ -86,7 +99,17 @@ If you don't have Python installed:
 
 #### Crawler Usage
 
-1. Basic usage:
+1. Make sure your virtual environment is activated (you should see `(venv)` in your command prompt)
+   If not, activate it:
+   ```
+   # On Windows:
+   venv\Scripts\activate
+
+   # On macOS/Linux:
+   source venv/bin/activate
+   ```
+
+2. Basic usage:
    ```
    python indafoto.py
    ```
@@ -106,12 +129,24 @@ If you don't have Python installed:
 
 #### Archive Explorer Usage
 
-1. Start the web interface:
+1. Make sure your virtual environment is activated (you should see `(venv)` in your command prompt)
+   If not, activate it:
+   ```
+   # On Windows:
+   venv\Scripts\activate
+   ```
+   or
+   ```
+   # On macOS/Linux:
+   source venv/bin/activate
+   ```
+
+2. Start the web interface:
    ```
    python indafoto_archive_explorer.py
    ```
 
-2. Open your web browser and navigate to:
+3. Open your web browser and navigate to:
    ```
    http://localhost:5000
    ```
@@ -183,6 +218,7 @@ The crawler includes several error handling features:
 - Internet Archive submission is enabled by default and can be disabled with --disable-archive flag
 - Failed pages are tracked and can be retried later
 - The Archive Explorer requires Flask to be installed (`pip install flask`)
+- Always run the tools with the virtual environment activated to ensure all dependencies are available
 
 ### Troubleshooting
 
