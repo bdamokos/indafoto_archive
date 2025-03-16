@@ -2,3 +2,4 @@ niquests
 tqdm
 beautifulsoup4
 flask
+Pillow
