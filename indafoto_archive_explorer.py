@@ -81,8 +81,18 @@ class ArchiveSubmitter(threading.Thread):
         """Check if URL is already archived on archive.ph."""
         try:
             check_url = f"https://archive.ph/{url}"
-            response = requests.head(check_url, timeout=10, allow_redirects=True)
-            return response.ok and 'archive.ph' in response.url
+            response = requests.get(check_url, timeout=10, allow_redirects=True)
+            
+            # First check if we got redirected to an archive.ph URL
+            if not response.ok or 'archive.ph' not in response.url:
+                return False
+                
+            # Then check if the page actually contains archived content
+            # archive.ph shows "No results" text when a page isn't actually archived
+            if 'No results' in response.text:
+                return False
+                
+            return True
         except Exception as e:
             logger.error(f"Failed to check archive.ph for {url}: {e}")
             return False
@@ -110,6 +120,7 @@ class ArchiveSubmitter(threading.Thread):
     def submit_to_archive_ph(self, url, timeout=60):
         """Submit URL to archive.ph (formerly archive.is)."""
         try:
+            # First check if already archived
             if self.check_archive_ph(url):
                 logger.info(f"URL {url} is already archived on archive.ph")
                 return {
@@ -124,11 +135,22 @@ class ArchiveSubmitter(threading.Thread):
                                   timeout=timeout,
                                   allow_redirects=True)
             
-            success = response.ok and 'archive.ph' in response.url
-            return {
-                'success': success,
-                'archive_url': response.url if success else None
-            }
+            # Check if submission was successful and page is actually archived
+            success = response.ok and 'archive.ph' in response.url and 'No results' not in response.text
+            
+            if success:
+                logger.info(f"Successfully archived {url} on archive.ph")
+                return {
+                    'success': True,
+                    'archive_url': response.url
+                }
+            else:
+                logger.warning(f"Failed to archive {url} on archive.ph: Page shows 'No results' or submission failed")
+                return {
+                    'success': False,
+                    'error': 'Page shows no results or submission failed'
+                }
+                
         except Exception as e:
             logger.error(f"Failed to submit to archive.ph: {e}")
             return {'success': False, 'error': str(e)}
