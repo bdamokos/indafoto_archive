@@ -582,7 +582,7 @@ def download_image(image_url, author):
             file_hash = calculate_file_hash(filename)
             return filename, file_hash
 
-        response = requests.get(image_url, headers=HEADERS, timeout=10, stream=True)
+        response = requests.get(image_url, headers=HEADERS, timeout=60, stream=True)
         response.raise_for_status()
         
         total_size = int(response.headers.get('content-length', 0))
