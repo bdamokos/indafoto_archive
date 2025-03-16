@@ -11,7 +11,6 @@ from datetime import datetime
 import threading
 import queue
 import argparse
-import random
 import hashlib
 import shutil
 from pathlib import Path
@@ -39,7 +38,7 @@ BASE_RATE_LIMIT = 1  # Base seconds between requests
 BASE_TIMEOUT = 60    # Base timeout in seconds
 FILES_PER_DIR = 1000  # Maximum number of files per directory
 ARCHIVE_SAMPLE_RATE = 0.005  # 0.5% sample rate for Internet Archive submissions
-NUM_WORKERS = 4  # Number of parallel download workers
+NUM_WORKERS = 8  # Number of parallel download workers
 
 HEADERS = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -87,6 +86,7 @@ def init_db():
         aperture TEXT,
         shutter_speed TEXT,
         taken_date TEXT,
+        upload_date TEXT,
         page_url TEXT
     )
     """)
@@ -105,6 +105,12 @@ def init_db():
     # Add sha256_hash column if it doesn't exist (for backwards compatibility)
     try:
         cursor.execute("ALTER TABLE images ADD COLUMN sha256_hash TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    
+    # Add upload_date column if it doesn't exist (for backwards compatibility)
+    try:
+        cursor.execute("ALTER TABLE images ADD COLUMN upload_date TEXT")
     except sqlite3.OperationalError:
         pass  # Column already exists
     
@@ -557,6 +563,14 @@ def extract_metadata(photo_page_url, attempt=1):
         if 'Készült' in exif_data:
             taken_date = parse_hungarian_date(exif_data['Készült'])
 
+        # Extract upload date from image_data div
+        upload_date = None
+        upload_date_elem = soup.find('li', class_='upload_date')
+        if upload_date_elem:
+            date_value = upload_date_elem.find('span', class_='value')
+            if date_value:
+                upload_date = parse_hungarian_date(date_value.text.strip())
+
         # Find highest resolution image URL
         high_res_url = None
         # First look for direct image URLs
@@ -598,6 +612,7 @@ def extract_metadata(photo_page_url, attempt=1):
             'aperture': exif_data.get('Rekesz'),
             'shutter_speed': exif_data.get('Zársebesség'),
             'taken_date': taken_date,
+            'upload_date': upload_date,
             'page_url': photo_page_url,
             'tags': tags
         }
@@ -1229,7 +1244,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                     INSERT INTO images (url, local_path, sha256_hash, title, author, 
                                      author_url, license, camera_make, camera_model, 
                                      focal_length, aperture, shutter_speed, taken_date, 
-                                     page_url)
+                                     upload_date, page_url)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     url,
@@ -1245,6 +1260,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                     metadata.get('aperture'),
                     metadata.get('shutter_speed'),
                     metadata.get('taken_date'),
+                    metadata.get('upload_date'),
                     metadata.get('page_url')
                 ))
                 
@@ -1676,14 +1692,14 @@ def redownload_author_images(author_name):
                     INSERT INTO images (
                         url, local_path, sha256_hash, title, author, author_url,
                         license, camera_make, camera_model, focal_length, aperture,
-                        shutter_speed, taken_date, page_url
+                        shutter_speed, taken_date, upload_date, page_url
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     url, new_path, new_hash, metadata['title'],
                     metadata['author'], metadata['author_url'], metadata['license'],
                     metadata['camera_make'], metadata['camera_model'], metadata['focal_length'],
                     metadata['aperture'], metadata['shutter_speed'],
-                    metadata['taken_date'], metadata['page_url']
+                    metadata['taken_date'], metadata['upload_date'], metadata['page_url']
                 ))
                 
                 # Get the new image ID
