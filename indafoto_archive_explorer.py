@@ -78,23 +78,20 @@ class ArchiveSubmitter(threading.Thread):
             return False
 
     def check_archive_ph(self, url):
-        """Check if URL is already archived on archive.ph."""
+        """Check if URL is already archived on archive.ph using their Memento API."""
         try:
-            check_url = f"https://archive.ph/{url}"
-            response = requests.get(check_url, timeout=10, allow_redirects=True)
+            # Use the Memento TimeMap API to check for archived versions
+            timemap_url = f"https://archive.ph/timemap/{url}"
+            response = requests.get(timemap_url, timeout=10)
             
-            # First check if we got redirected to an archive.ph URL
-            if not response.ok or 'archive.ph' not in response.url:
-                return False
-                
-            # Then check if the page actually contains archived content
-            # archive.ph shows "No results" text when a page isn't actually archived
-            if 'No results' in response.text:
-                return False
-                
-            return True
+            if response.ok:
+                # If we get a successful response from the TimeMap API and it contains
+                # at least one archived version, the page is archived
+                return len(response.text.strip().split('\n')) > 0
+            
+            return False
         except Exception as e:
-            logger.error(f"Failed to check archive.ph for {url}: {e}")
+            logger.error(f"Failed to check archive.ph Memento API for {url}: {e}")
             return False
 
     def submit_to_archive_org(self, url, timeout=60):
@@ -120,13 +117,22 @@ class ArchiveSubmitter(threading.Thread):
     def submit_to_archive_ph(self, url, timeout=60):
         """Submit URL to archive.ph (formerly archive.is)."""
         try:
-            # First check if already archived
+            # First check if already archived using Memento API
             if self.check_archive_ph(url):
                 logger.info(f"URL {url} is already archived on archive.ph")
-                return {
-                    'success': True,
-                    'archive_url': f"https://archive.ph/{url}"
-                }
+                # Use the timegate to get the latest archived version
+                timegate_url = f"https://archive.ph/timegate/{url}"
+                response = requests.get(timegate_url, timeout=timeout, allow_redirects=True)
+                if response.ok:
+                    return {
+                        'success': True,
+                        'archive_url': response.url
+                    }
+                else:
+                    return {
+                        'success': True,
+                        'archive_url': f"https://archive.ph/{url}"  # Fallback to direct URL
+                    }
 
             data = {'url': url}
             response = requests.post('https://archive.ph/submit/', 
@@ -135,21 +141,24 @@ class ArchiveSubmitter(threading.Thread):
                                   timeout=timeout,
                                   allow_redirects=True)
             
-            # Check if submission was successful and page is actually archived
-            success = response.ok and 'archive.ph' in response.url and 'No results' not in response.text
+            # After submission, verify using Memento API
+            if response.ok:
+                time.sleep(5)  # Give some time for the archive to process
+                if self.check_archive_ph(url):
+                    # Get the actual archive URL using timegate
+                    timegate_url = f"https://archive.ph/timegate/{url}"
+                    archive_response = requests.get(timegate_url, timeout=timeout, allow_redirects=True)
+                    if archive_response.ok:
+                        return {
+                            'success': True,
+                            'archive_url': archive_response.url
+                        }
             
-            if success:
-                logger.info(f"Successfully archived {url} on archive.ph")
-                return {
-                    'success': True,
-                    'archive_url': response.url
-                }
-            else:
-                logger.warning(f"Failed to archive {url} on archive.ph: Page shows 'No results' or submission failed")
-                return {
-                    'success': False,
-                    'error': 'Page shows no results or submission failed'
-                }
+            logger.warning(f"Failed to archive {url} on archive.ph: Submission verification failed")
+            return {
+                'success': False,
+                'error': 'Submission verification failed'
+            }
                 
         except Exception as e:
             logger.error(f"Failed to submit to archive.ph: {e}")
@@ -634,8 +643,8 @@ def view_image(image_id):
         """, (image['author_url'],))
         author_archive = cursor.fetchone()
 
-        # Get archive information for author details page
-        author_details_url = f"https://indafoto.hu/{image['author']}/details"
+        # Get archive information for author details page using the correct URL
+        author_details_url = image['author_url'] + "/details"
         cursor.execute("""
             SELECT archive_url, status, submission_date
             FROM archive_submissions
