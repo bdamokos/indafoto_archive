@@ -607,8 +607,11 @@ def mark_image():
     try:
         if marked:
             logger.info(f"Inserting/updating marked_images record for image {image_id}")
+            # First delete any existing records for this image
+            cursor.execute("DELETE FROM marked_images WHERE image_id = ?", (image_id,))
+            # Then insert the new record
             cursor.execute("""
-                INSERT OR REPLACE INTO marked_images (image_id, note, marked_date)
+                INSERT INTO marked_images (image_id, note, marked_date)
                 VALUES (?, ?, ?)
             """, (image_id, note, datetime.now().isoformat()))
             
@@ -638,6 +641,7 @@ def mark_image():
                 logger.info("Archiving is disabled, skipping archive submission")
         else:
             logger.info(f"Unmarking image {image_id}")
+            # Delete all records for this image
             cursor.execute("DELETE FROM marked_images WHERE image_id = ?", (image_id,))
         
         conn.commit()
