@@ -633,7 +633,7 @@ class ArchiveSubmitter(threading.Thread):
         """Check if URL is already archived on archive.org."""
         try:
             check_url = f"https://web.archive.org/cdx/search/cdx?url={url}&output=json"
-            response = requests.get(check_url, timeout=10)
+            response = requests.get(check_url, timeout=60)
             if response.ok:
                 data = response.json()
                 # If we have at least one snapshot, the page is archived
@@ -647,7 +647,7 @@ class ArchiveSubmitter(threading.Thread):
         """Check if URL is already archived on archive.ph."""
         try:
             check_url = f"https://archive.ph/{url}"
-            response = requests.head(check_url, timeout=10, allow_redirects=True)
+            response = requests.head(check_url, timeout=60, allow_redirects=True)
             # If we get redirected to an archive.ph URL, it's archived
             return response.ok and 'archive.ph' in response.url
         except Exception as e:
@@ -675,7 +675,7 @@ class ArchiveSubmitter(threading.Thread):
             logger.error(f"Failed to submit to archive.org: {e}")
             return {'success': False, 'error': str(e)}
 
-    def submit_to_archive_ph(self, url, timeout=30):
+    def submit_to_archive_ph(self, url, timeout=60):
         """Submit URL to archive.ph (formerly archive.is)."""
         try:
             # First check if already archived
