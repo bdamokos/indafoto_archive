@@ -82,23 +82,17 @@
         <div class="card image-card">
             <a href="/image/{{ image.id }}">
                 <img src="/image_file/{{ image.local_path }}" class="card-img-top" alt="{{ image.title }}">
-                {% if image.id in marked_images %}
-                <div class="marked-badge" id="marked-badge-{{ image.id }}">
-                    <i class="fas fa-star"></i>
-                </div>
-                {% endif %}
-                <div class="image-overlay">
-                    <h6 class="mb-1">{{ image.title }}</h6>
-                    <small>by {{ image.author }}</small>
-                </div>
             </a>
-            <div class="card-footer d-flex justify-content-between align-items-center">
+            <button class="star-button" 
+                    onclick="toggleMark({{ image.id }}, this)"
+                    data-marked="{{ image.is_marked }}">
+                <i class="fa{{ 's' if image.is_marked else 'r' }} fa-star"></i>
+            </button>
+            <div class="image-overlay">
+                <h6 class="mb-1">{{ image.title }}</h6>
+                <small>by {{ image.author }}</small>
+                <br>
                 <small class="text-muted">{{ image.taken_date }}</small>
-                <button class="btn btn-link p-0" 
-                        onclick="toggleMark({{ image.id }}, this)"
-                        data-marked="{{ image.id in marked_images|default([]) }}">
-                    <i class="fa{{ 's' if image.id in marked_images else 'r' }} fa-star"></i>
-                </button>
             </div>
         </div>
     </div>

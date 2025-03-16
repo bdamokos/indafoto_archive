@@ -34,17 +34,18 @@
                          class="card-img-top" 
                          alt="{{ image.title }}">
                 </a>
+                <button onclick="toggleMark({{ image.id }}, this)" 
+                        class="btn btn-link position-absolute top-0 end-0 m-2"
+                        data-marked="{{ image.is_marked }}"
+                        style="z-index: 1000; background: rgba(255, 255, 255, 0.8); border-radius: 50%; padding: 8px;">
+                    <i class="fa{{ 's' if image.is_marked else 'r' }} fa-star text-warning"></i>
+                </button>
                 <div class="image-overlay">
                     <h6 class="card-title text-truncate">{{ image.title }}</h6>
                     <p class="card-text small mb-0">
                         by <a href="{{ url_for('browse_images', author=image.author) }}" class="text-white">{{ image.author }}</a>
                     </p>
                 </div>
-                <button onclick="toggleMark({{ image.id }}, this)" 
-                        class="btn btn-link position-absolute top-0 end-0 m-2"
-                        data-marked="false">
-                    <i class="far fa-star"></i>
-                </button>
             </div>
         </div>
         {% endfor %}
