@@ -111,4 +111,67 @@
         </div>
     </div>
 </div>
+
+<div class="image-metadata">
+    <h2>Image Details</h2>
+    <p><strong>Title:</strong> {{ image.title }}</p>
+    <p><strong>Author:</strong> <a href="{{ url_for('author_gallery', author_name=image.author) }}">{{ image.author }}</a></p>
+    <p><strong>License:</strong> {{ image.license }}</p>
+    {% if image.camera_make %}
+    <p><strong>Camera:</strong> {{ image.camera_make }}</p>
+    {% endif %}
+    {% if image.focal_length %}
+    <p><strong>Focal Length:</strong> {{ image.focal_length }}</p>
+    {% endif %}
+    {% if image.aperture %}
+    <p><strong>Aperture:</strong> {{ image.aperture }}</p>
+    {% endif %}
+    {% if image.shutter_speed %}
+    <p><strong>Shutter Speed:</strong> {{ image.shutter_speed }}</p>
+    {% endif %}
+    {% if image.taken_date %}
+    <p><strong>Taken:</strong> {{ image.taken_date }}</p>
+    {% endif %}
+</div>
+
+<div class="archive-information">
+    <h2>Archive Information</h2>
+    {% if image_archive %}
+        <div class="archive-item">
+            <h3>Image Page Archive</h3>
+            {% if image_archive.status == 'success' %}
+                <p class="archive-success">
+                    <strong>Status:</strong> Archived successfully on {{ image_archive.submission_date }}
+                    <br>
+                    <a href="{{ image_archive.archive_url }}" target="_blank">View archived page</a>
+                </p>
+            {% else %}
+                <p class="archive-failed">
+                    <strong>Status:</strong> Archive attempt failed
+                </p>
+            {% endif %}
+        </div>
+    {% else %}
+        <p class="archive-missing">Image page not archived yet</p>
+    {% endif %}
+
+    {% if author_archive %}
+        <div class="archive-item">
+            <h3>Author Page Archive</h3>
+            {% if author_archive.status == 'success' %}
+                <p class="archive-success">
+                    <strong>Status:</strong> Archived successfully on {{ author_archive.submission_date }}
+                    <br>
+                    <a href="{{ author_archive.archive_url }}" target="_blank">View archived author page</a>
+                </p>
+            {% else %}
+                <p class="archive-failed">
+                    <strong>Status:</strong> Archive attempt failed
+                </p>
+            {% endif %}
+        </div>
+    {% else %}
+        <p class="archive-missing">Author page not archived yet</p>
+    {% endif %}
+</div>
 {% endblock %} 
