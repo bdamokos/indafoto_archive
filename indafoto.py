@@ -668,8 +668,18 @@ class ArchiveSubmitter(threading.Thread):
             response = requests.get(check_url, timeout=60)
             if response.ok:
                 data = response.json()
-                # If we have at least one snapshot, the page is archived
-                return len(data) > 1  # First row is header
+                if len(data) > 1:  # First row is header
+                    # Get the timestamp of the most recent snapshot
+                    # CDX API returns: [urlkey, timestamp, original, mimetype, statuscode, digest, length]
+                    latest_snapshot = data[-1]  # Last entry is the most recent
+                    timestamp = latest_snapshot[1]  # Timestamp is in YYYYMMDDhhmmss format
+                    
+                    # Convert timestamp to datetime
+                    snapshot_date = datetime.strptime(timestamp, '%Y%m%d%H%M%S')
+                    cutoff_date = datetime(2024, 7, 1)  # Second half of 2024
+                    
+                    # Return True only if the snapshot is recent enough
+                    return snapshot_date >= cutoff_date
             return False
         except Exception as e:
             logger.error(f"Failed to check archive.org for {url}: {e}")
@@ -683,9 +693,21 @@ class ArchiveSubmitter(threading.Thread):
             response = requests.get(timemap_url, timeout=10)
             
             if response.ok:
-                # If we get a successful response from the TimeMap API and it contains
-                # at least one archived version, the page is archived
-                return len(response.text.strip().split('\n')) > 0
+                # Parse the TimeMap response
+                # Format is: <url>; rel="original",<archive_url>; rel="memento"; datetime="timestamp",...
+                lines = response.text.strip().split('\n')
+                if len(lines) > 1:  # If we have any archived versions
+                    # Get the last line which contains the most recent archive
+                    latest_archive = lines[-1]
+                    # Extract the datetime from the memento line
+                    datetime_match = re.search(r'datetime="([^"]+)"', latest_archive)
+                    if datetime_match:
+                        # Parse the datetime (format: Thu, 14 Mar 2024 15:30:00 GMT)
+                        archive_date = datetime.strptime(datetime_match.group(1), '%a, %d %b %Y %H:%M:%S GMT')
+                        cutoff_date = datetime(2024, 7, 1)  # Second half of 2024
+                        
+                        # Return True only if the archive is recent enough
+                        return archive_date >= cutoff_date
             
             return False
         except Exception as e:
