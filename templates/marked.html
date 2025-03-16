@@ -66,6 +66,17 @@
                     <p class="card-text small mb-2">
                         by <a href="{{ url_for('browse_images', author=image.author) }}">{{ image.author }}</a>
                     </p>
+                    {% if image.taken_date or image.upload_date %}
+                    <p class="card-text small mb-2">
+                        {% if image.taken_date %}
+                        <span class="text-muted">Taken: {{ image.taken_date }}</span>
+                        {% endif %}
+                        {% if image.upload_date %}
+                        <br>
+                        <span class="text-muted">Uploaded: {{ image.upload_date }}</span>
+                        {% endif %}
+                    </p>
+                    {% endif %}
                     {% if image.note %}
                     <div class="note-box">
                         <small class="text-muted">Note:</small>

@@ -92,7 +92,13 @@
                 <h6 class="mb-1">{{ image.title }}</h6>
                 <small>by {{ image.author }}</small>
                 <br>
-                <small class="text-muted">{{ image.taken_date }}</small>
+                {% if image.taken_date %}
+                <small class="text-muted">Taken: {{ image.taken_date }}</small>
+                {% endif %}
+                {% if image.upload_date %}
+                <br>
+                <small class="text-muted">Uploaded: {{ image.upload_date }}</small>
+                {% endif %}
             </div>
         </div>
     </div>
