@@ -441,21 +441,44 @@ def extract_metadata(photo_page_url, attempt=1):
                                 'is_public': 'public' in li.get('class', [])
                             })
 
-        # Extract tags
+        # Extract tags - try multiple possible locations
         tags = []
-        tags_container = soup.find("div", class_="box_data")
-        if tags_container:
-            for tag_li in tags_container.find_all("li", class_="tag"):
-                tag_link = tag_li.find("a", class_="global-tag")
-                if tag_link:
-                    tag_name = tag_link.get_text(strip=True)
-                    # Extract count from title attribute (e.g., "Az összes kuba címkéjű kép (2714 db)")
-                    count_match = re.search(r'\((\d+)\s*db\)', tag_link.get('title', ''))
-                    count = int(count_match.group(1)) if count_match else 0
-                    tags.append({
-                        'name': tag_name,
-                        'count': count
-                    })
+        
+        # First try to find the tags box
+        tags_box = soup.find("div", class_="tags box")
+        if tags_box:
+            # Look for box_data div inside the tags box
+            tags_container = tags_box.find("div", class_="box_data")
+            if tags_container:
+                for tag_li in tags_container.find_all("li", class_="tag"):
+                    tag_link = tag_li.find("a", class_="global-tag")
+                    if tag_link:
+                        tag_name = tag_link.get_text(strip=True)
+                        # Extract count from title attribute (e.g., "Az összes kuba címkéjű kép (2714 db)")
+                        count_match = re.search(r'\((\d+)\s*db\)', tag_link.get('title', ''))
+                        count = int(count_match.group(1)) if count_match else 0
+                        tags.append({
+                            'name': tag_name,
+                            'count': count
+                        })
+        
+        # If no tags found, try looking for tags in other locations
+        if not tags:
+            # Try finding all global-tag links anywhere in the page
+            tag_links = soup.find_all("a", class_="global-tag")
+            for tag_link in tag_links:
+                tag_name = tag_link.get_text(strip=True)
+                # Extract count from title attribute
+                count_match = re.search(r'\((\d+)\s*db\)', tag_link.get('title', ''))
+                count = int(count_match.group(1)) if count_match else 0
+                tags.append({
+                    'name': tag_name,
+                    'count': count
+                })
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        tags = [tag for tag in tags if not (tag['name'] in seen or seen.add(tag['name']))]
 
         # Extract EXIF data from the table
         exif_data = {}
@@ -1138,6 +1161,19 @@ def test_album_extraction():
     else:
         print("Failed to extract metadata from URL 2")
 
+def test_tag_extraction():
+    """Test function to verify tag extraction from specific pages."""
+    # Test case: Page with specific tags
+    url = "https://indafoto.hu/vertesi76/image/27063213-3c4ac9f5"
+    print("\nTesting tag extraction from URL:", url)
+    metadata = extract_metadata(url)
+    if metadata:
+        print("\nTags:")
+        for tag in metadata['tags']:
+            print(f"- {tag['name']} (count: {tag['count']})")
+    else:
+        print("Failed to extract metadata from URL")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Indafoto Crawler')
     parser.add_argument('--start-offset', type=int, default=0,
@@ -1148,11 +1184,15 @@ if __name__ == "__main__":
                        help='Retry failed pages instead of normal crawling')
     parser.add_argument('--test', action='store_true',
                        help='Run test function instead of crawler')
+    parser.add_argument('--test-tags', action='store_true',
+                       help='Run tag extraction test')
     args = parser.parse_args()
     
     try:
         if args.test:
             test_album_extraction()
+        elif args.test_tags:
+            test_tag_extraction()
         else:
             crawl_images(start_offset=args.start_offset, 
                         enable_archive=not args.disable_archive,
