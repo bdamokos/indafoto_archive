@@ -128,6 +128,8 @@ If you don't have Python installed:
    ```
 
 #### Archive Explorer Usage
+![Archive Explorer Interface](docs/archive_explorer.png)
+
 
 1. Make sure your virtual environment is activated (you should see `(venv)` in your command prompt)
    If not, activate it:
