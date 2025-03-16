@@ -73,9 +73,9 @@ If you don't have Python installed:
 
 2. Navigate to the project folder:
    ```
-   cd path/to/indafoto-crawler
+   cd path/to/indafoto_archive
    ```
-   (Replace "path/to/indafoto-crawler" with the actual path to where you extracted the files)
+   (Replace "path/to/indafoto_archive" with the actual path to where you extracted the files)
 
 3. Install the required packages:
    ```
@@ -94,7 +94,7 @@ If you don't have Python installed:
 2. Available command-line arguments:
    ```
    python indafoto.py --start-offset N  # Start crawling from page N
-   python indafoto.py --enable-archive  # Enable Internet Archive / Archive.ph submissions
+   python indafoto.py --enable-archive  # Enable Internet Archive / Archive.ph submissions (disabled by default)
    python indafoto.py --retry           # Retry previously failed pages
    python indafoto.py --test            # Run test function for album extraction
    ```
@@ -123,7 +123,7 @@ If you don't have Python installed:
 - Downloads images and their metadata (title, author, license, camera info, etc.)
 - Organizes images in author-based folders
 - Calculates and stores SHA-256 hashes of downloaded images
-- Optional Internet Archive submission of author pages and selected image pages
+- Optional Internet Archive submission of author pages and a sample of the image pages (disabled by default). The point is to use it as future proof of provenance of the images
 - Rate limiting to avoid overloading the server
 - Smart resume capability:
   - Can restart from any page using --start-offset
@@ -180,7 +180,7 @@ The crawler includes several error handling features:
 - The crawler includes rate limiting to avoid overloading the server
 - Downloaded images are organized in folders to prevent having too many files in a single directory
 - A log file "indafoto_crawler.log" will be created to track the script's progress
-- Internet Archive submission is disabled by default to avoid potential errors
+- Internet Archive submission is disabled by default and can be enabled with --enable-archive flag
 - Failed pages are tracked and can be retried later
 - The Archive Explorer requires Flask to be installed (`pip install flask`)
 
