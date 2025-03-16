@@ -40,7 +40,7 @@ BASE_RATE_LIMIT = 1  # Base seconds between requests
 BASE_TIMEOUT = 60    # Base timeout in seconds
 FILES_PER_DIR = 1000  # Maximum number of files per directory
 ARCHIVE_SAMPLE_RATE = 0.005  # 0.5% sample rate for Internet Archive submissions
-NUM_WORKERS = 5  # Number of parallel download workers
+NUM_WORKERS = 1  # Number of parallel download workers
 
 HEADERS = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
