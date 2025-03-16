@@ -1598,8 +1598,6 @@ def delete_image_data(conn, cursor, image_id):
         
         # Delete from image_albums
         cursor.execute("DELETE FROM image_albums WHERE image_id = ?", (image_id,))
-        
-        # Delete from image_tags
         cursor.execute("DELETE FROM image_tags WHERE image_id = ?", (image_id,))
         
         # Delete from marked_images if exists
@@ -1805,9 +1803,14 @@ if __name__ == "__main__":
                        help='Run camera make/model extraction test')
     parser.add_argument('--redownload-author',
                        help='Redownload all images from a specific author')
+    parser.add_argument('--workers', type=int, default=8,
+                       help='Number of parallel download workers (default: 8)')
     args = parser.parse_args()
     
     try:
+        # Set the number of workers from command line argument
+        NUM_WORKERS = args.workers
+        
         if args.redownload_author:
             redownload_author_images(args.redownload_author)
         elif args.test:

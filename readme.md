@@ -132,11 +132,12 @@ python indafoto.py
    python indafoto.py --start-offset N  # Start crawling from page N
    python indafoto.py --retry           # Retry previously failed pages
    python indafoto.py --test            # Run test function for album extraction
+   python indafoto.py --workers N       # Set number of parallel download workers (default: 8)
    ```
 
    You can combine arguments:
    ```
-   python indafoto.py --start-offset 100
+   python indafoto.py --start-offset 100 --workers 4
    ```
 
 #### Archive Explorer Usage
