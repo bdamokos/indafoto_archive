@@ -9,12 +9,282 @@ from datetime import datetime
 import math
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+import threading
+import queue
+import json
+import niquests as requests
+import logging
+import time
+from datetime import datetime, date
+import signal
+import sys
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('indafoto_explorer.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
 # Configuration
 DB_FILE = "indafoto.db"
 ITEMS_PER_PAGE = 24  # Number of items to show per page
+SITE_DELETION_DATE = date(2025, 4, 1)  # Site deletion date
+ARCHIVE_RATE_LIMIT = 5  # Seconds between archive submissions
+ARCHIVE_QUEUE_FILE = "archive_queue.json"
+
+# Headers for archive requests
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+}
+
+class ArchiveSubmitter(threading.Thread):
+    def __init__(self, queue):
+        super().__init__()
+        self.queue = queue
+        self.daemon = True
+        self.running = True
+        self.archive_services = [
+            {
+                'name': 'archive.org',
+                'submit_url': 'https://web.archive.org/save/{}',
+                'view_url': 'https://web.archive.org/web/*/{}'
+            },
+            {
+                'name': 'archive.ph',
+                'submit_url': 'https://archive.ph/submit/',
+                'view_url': 'https://archive.ph/{}'
+            }
+        ]
+
+    def check_archive_org(self, url):
+        """Check if URL is already archived on archive.org."""
+        try:
+            check_url = f"https://web.archive.org/cdx/search/cdx?url={url}&output=json"
+            response = requests.get(check_url, timeout=10)
+            if response.ok:
+                data = response.json()
+                return len(data) > 1  # First row is header
+            return False
+        except Exception as e:
+            logger.error(f"Failed to check archive.org for {url}: {e}")
+            return False
+
+    def check_archive_ph(self, url):
+        """Check if URL is already archived on archive.ph."""
+        try:
+            check_url = f"https://archive.ph/{url}"
+            response = requests.head(check_url, timeout=10, allow_redirects=True)
+            return response.ok and 'archive.ph' in response.url
+        except Exception as e:
+            logger.error(f"Failed to check archive.ph for {url}: {e}")
+            return False
+
+    def submit_to_archive_org(self, url, timeout=60):
+        """Submit URL to archive.org with extended timeout."""
+        try:
+            if self.check_archive_org(url):
+                logger.info(f"URL {url} is already archived on archive.org")
+                return {
+                    'success': True,
+                    'archive_url': f"https://web.archive.org/web/*/{url}"
+                }
+
+            archive_url = f"https://web.archive.org/save/{url}"
+            response = requests.get(archive_url, timeout=timeout)
+            return {
+                'success': response.ok,
+                'archive_url': f"https://web.archive.org/web/*/{url}" if response.ok else None
+            }
+        except Exception as e:
+            logger.error(f"Failed to submit to archive.org: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def submit_to_archive_ph(self, url, timeout=60):
+        """Submit URL to archive.ph (formerly archive.is)."""
+        try:
+            if self.check_archive_ph(url):
+                logger.info(f"URL {url} is already archived on archive.ph")
+                return {
+                    'success': True,
+                    'archive_url': f"https://archive.ph/{url}"
+                }
+
+            data = {'url': url}
+            response = requests.post('https://archive.ph/submit/', 
+                                  data=data, 
+                                  headers=HEADERS,
+                                  timeout=timeout,
+                                  allow_redirects=True)
+            
+            success = response.ok and 'archive.ph' in response.url
+            return {
+                'success': success,
+                'archive_url': response.url if success else None
+            }
+        except Exception as e:
+            logger.error(f"Failed to submit to archive.ph: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def run(self):
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        while self.running:
+            try:
+                item = self.queue.get(timeout=1)  # 1 second timeout to check running flag
+                if item is None:  # Poison pill
+                    break
+                    
+                url, url_type = item  # Unpack after checking for None
+                
+                # Check if already submitted
+                cursor.execute("SELECT archive_url FROM archive_submissions WHERE url = ?", (url,))
+                result = cursor.fetchone()
+                if result and result[0]:
+                    self.queue.task_done()
+                    continue
+
+                # Try each archive service in order until one succeeds
+                archive_url = None
+                status = 'failed'
+                error_messages = []
+                
+                # First try archive.org
+                result = self.submit_to_archive_org(url)
+                if result['success']:
+                    archive_url = result['archive_url']
+                    status = 'success'
+                else:
+                    error_messages.append(f"archive.org: {result.get('error', 'Unknown error')}")
+                    
+                    # Try archive.ph as fallback
+                    result = self.submit_to_archive_ph(url)
+                    if result['success']:
+                        archive_url = result['archive_url']
+                        status = 'success'
+                    else:
+                        error_messages.append(f"archive.ph: {result.get('error', 'Unknown error')}")
+
+                # Record the attempt
+                cursor.execute("""
+                    INSERT OR REPLACE INTO archive_submissions (
+                        url, submission_date, type, status, archive_url, error
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    url,
+                    datetime.now().isoformat(),
+                    url_type,
+                    status,
+                    archive_url,
+                    '; '.join(error_messages) if error_messages else None
+                ))
+                conn.commit()
+                
+                if status == 'success':
+                    logger.info(f"Successfully archived {url} to {archive_url}")
+                else:
+                    logger.warning(f"Failed to archive {url}. Errors: {'; '.join(error_messages)}")
+                    
+                self.queue.task_done()
+                time.sleep(ARCHIVE_RATE_LIMIT)  # Rate limit archive submissions
+                
+            except queue.Empty:
+                continue  # No items in queue, check running flag
+            except Exception as e:
+                logger.error(f"Error in archive submitter: {e}")
+                continue
+                
+        conn.close()
+
+    def stop(self):
+        """Stop the archive submitter thread."""
+        self.running = False
+        self.queue.put(None)  # Poison pill
+
+# Global archive queue and submitter
+archive_queue = queue.Queue()
+archive_submitter = None
+
+def load_archive_queue():
+    """Load pending archive submissions from file."""
+    try:
+        if os.path.exists(ARCHIVE_QUEUE_FILE):
+            with open(ARCHIVE_QUEUE_FILE, 'r') as f:
+                data = json.load(f)
+                logger.info(f"Loaded {len(data)} items from archive queue file")
+                return data
+    except Exception as e:
+        logger.error(f"Failed to load archive queue: {e}")
+    return []
+
+def save_archive_queue():
+    """Save pending archive submissions to file."""
+    try:
+        # Convert queue to list
+        queue_list = []
+        while not archive_queue.empty():
+            try:
+                item = archive_queue.get_nowait()
+                if item is not None:  # Skip poison pills
+                    queue_list.append(item)
+            except queue.Empty:
+                break
+        
+        # Save to file
+        with open(ARCHIVE_QUEUE_FILE, 'w') as f:
+            json.dump(queue_list, f)
+            
+        # Put items back in queue
+        for item in queue_list:
+            archive_queue.put(item)
+            
+        logger.info(f"Saved {len(queue_list)} items to archive queue file")
+        if queue_list:
+            logger.info(f"Saved items: {queue_list}")
+    except Exception as e:
+        logger.error(f"Failed to save archive queue: {e}")
+
+def start_archive_submitter():
+    """Start the archive submitter thread and load pending submissions."""
+    global archive_submitter
+    
+    logger.info("Starting archive submitter...")
+    
+    # Load pending submissions
+    pending_submissions = load_archive_queue()
+    logger.info(f"Loaded {len(pending_submissions)} pending submissions")
+    for submission in pending_submissions:
+        archive_queue.put(submission)
+    
+    # Start submitter thread
+    archive_submitter = ArchiveSubmitter(archive_queue)
+    archive_submitter.start()
+    logger.info("Archive submitter thread started")
+
+def stop_archive_submitter():
+    """Stop the archive submitter thread and save pending submissions."""
+    global archive_submitter
+    if archive_submitter:
+        logger.info("Stopping archive submitter...")
+        archive_submitter.stop()
+        archive_submitter.join()
+        save_archive_queue()
+        logger.info("Archive submitter stopped and queue saved")
+
+def should_archive():
+    """Check if we should still archive pages based on the deletion date."""
+    today = date.today()
+    should_archive = today < SITE_DELETION_DATE
+    logger.info(f"Checking if archiving is enabled: today={today}, deletion_date={SITE_DELETION_DATE}, should_archive={should_archive}")
+    return should_archive
 
 def get_db():
     """Create a database connection."""
@@ -326,6 +596,8 @@ def mark_image():
     note = data.get('note', '')
     marked = data.get('marked', True)
     
+    logger.info(f"Marking image {image_id} with note: {note}, marked: {marked}")
+    
     if not image_id:
         return jsonify({'error': 'Image ID is required'}), 400
     
@@ -334,16 +606,44 @@ def mark_image():
     
     try:
         if marked:
+            logger.info(f"Inserting/updating marked_images record for image {image_id}")
             cursor.execute("""
                 INSERT OR REPLACE INTO marked_images (image_id, note, marked_date)
                 VALUES (?, ?, ?)
             """, (image_id, note, datetime.now().isoformat()))
+            
+            # If marking an image and before deletion date, queue for archiving
+            if should_archive():
+                logger.info(f"Archiving is enabled, getting image details for {image_id}")
+                # Get image details
+                cursor.execute("SELECT page_url, author_url FROM images WHERE id = ?", (image_id,))
+                image = cursor.fetchone()
+                
+                if image:
+                    logger.info(f"Found image details: page_url={image['page_url']}, author_url={image['author_url']}")
+                    # Queue image page for archiving
+                    logger.info(f"Queueing image page for archiving: {image['page_url']}")
+                    archive_queue.put((image['page_url'], 'image_page'))
+                    
+                    # Queue author page if available
+                    if image['author_url']:
+                        logger.info(f"Queueing author page for archiving: {image['author_url']}")
+                        archive_queue.put((image['author_url'], 'author_page'))
+                        
+                    # Save queue immediately after adding items
+                    save_archive_queue()
+                else:
+                    logger.warning(f"No image found with ID {image_id}")
+            else:
+                logger.info("Archiving is disabled, skipping archive submission")
         else:
+            logger.info(f"Unmarking image {image_id}")
             cursor.execute("DELETE FROM marked_images WHERE image_id = ?", (image_id,))
         
         conn.commit()
         return jsonify({'success': True})
     except Exception as e:
+        logger.error(f"Error in mark_image: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
@@ -664,16 +964,44 @@ def create_app():
     # Initialize the database
     init_db()
     
+    # Start archive submitter
+    start_archive_submitter()
+    
     # Add template context processors
     @app.context_processor
     def utility_processor():
         return {
             'max': max,
-            'min': min
+            'min': min,
+            'len': len,
+            'should_archive': should_archive
         }
     
     return app
 
+def signal_handler(signum, frame):
+    """Handle interrupt signals by gracefully shutting down."""
+    logger.info(f"Received signal {signum}, shutting down gracefully...")
+    stop_archive_submitter()
+    sys.exit(0)
+
 if __name__ == '__main__':
+    # Create and configure the application
     app = create_app()
-    app.run(debug=True)
+    
+    # Register cleanup handler
+    import atexit
+    atexit.register(stop_archive_submitter)
+    
+    # Register signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    try:
+        # Start the Flask development server on port 5001
+        logger.info("Starting Flask server on port 5001...")
+        app.run(debug=True, host='0.0.0.0', port=5001)
+    except Exception as e:
+        logger.error(f"Failed to start server: {e}")
+        stop_archive_submitter()
+        sys.exit(1)
