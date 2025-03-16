@@ -1022,11 +1022,13 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 - processed_count: Number of images processed
                 - failed_count: Number of images that failed
                 - author_counts: Dictionary of images per author
+                - skipped_count: Number of images skipped (duplicates)
     """
     author_image_counts = {}
     download_tasks = []
     processed_count = 0
     failed_count = 0
+    skipped_count = 0
     
     try:
         # First pass: collect download tasks and check for duplicates
@@ -1052,18 +1054,29 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                     failed_count += 1
                     continue
                 
-                # Check if image already exists by URL
-                cursor.execute("SELECT id FROM images WHERE url = ?", (url,))
-                if cursor.fetchone():
-                    logger.info(f"Image with URL {url} already exists, skipping...")
-                    processed_count += 1
-                    continue
-                
-                # Try to get high-res version URL
+                # Try to get high-res version URL before checking duplicates
                 high_res_url = get_high_res_url(url)
                 download_url = high_res_url if high_res_url else url
                 
-                # Add to download tasks
+                # Check if any version of this image already exists
+                cursor.execute("""
+                    SELECT id, local_path 
+                    FROM images 
+                    WHERE url IN (?, ?, ?)
+                """, (download_url, url, url.replace('_l.jpg', '_xl.jpg')))
+                existing = cursor.fetchone()
+                
+                if existing:
+                    logger.info(f"Image already exists (ID: {existing[0]}, path: {existing[1]}), skipping...")
+                    skipped_count += 1
+                    processed_count += 1  # Count as processed since it's already in our archive
+                    
+                    # Still update author counts for statistics
+                    author = metadata.get('author', 'unknown')
+                    author_image_counts[author] = author_image_counts.get(author, 0) + 1
+                    continue
+                
+                # Add to download tasks if not a duplicate
                 download_tasks.append((download_url, metadata))
                 
                 # Update author count
@@ -1075,7 +1088,9 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 failed_count += 1
                 continue
         
-        # Second pass: parallel download and process
+        logger.info(f"Found {len(download_tasks)} new images to download, {skipped_count} duplicates skipped")
+        
+        # Second pass: parallel download and process only new images
         with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
             future_to_task = {
                 executor.submit(download_image, url, metadata['author']): (url, metadata)
@@ -1087,13 +1102,6 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 try:
                     local_path, file_hash = future.result()
                     if local_path and file_hash:
-                        # Double check for duplicates before insertion
-                        cursor.execute("SELECT id FROM images WHERE url = ?", (url,))
-                        if cursor.fetchone():
-                            logger.warning(f"Duplicate detected during insertion for URL {url}, skipping...")
-                            processed_count += 1
-                            continue
-                        
                         # Insert image data
                         cursor.execute("""
                             INSERT INTO images (url, local_path, sha256_hash, title, author, 
@@ -1176,13 +1184,14 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                     failed_count += 1
                     continue
         
-        # Return success if we processed all images (allowing for duplicates)
+        # Return success if we processed all images (including skipped ones)
         total_images = len(image_data_list)
         success = (processed_count + failed_count) == total_images and failed_count == 0
         
         stats = {
             'processed_count': processed_count,
             'failed_count': failed_count,
+            'skipped_count': skipped_count,
             'total_images': total_images,
             'author_counts': author_image_counts
         }
@@ -1194,6 +1203,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
         return False, {
             'processed_count': processed_count,
             'failed_count': failed_count + len(image_data_list) - processed_count,
+            'skipped_count': skipped_count,
             'total_images': len(image_data_list),
             'author_counts': author_image_counts,
             'error': str(e)
