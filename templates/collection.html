@@ -45,6 +45,17 @@
                     <p class="card-text small mb-0">
                         by <a href="{{ url_for('browse_images', author=image.author) }}" class="text-white">{{ image.author }}</a>
                     </p>
+                    {% if image.taken_date or image.upload_date %}
+                    <p class="card-text small mb-0">
+                        {% if image.taken_date %}
+                        <span class="text-white-50">Taken: {{ image.taken_date }}</span>
+                        {% endif %}
+                        {% if image.upload_date %}
+                        <br>
+                        <span class="text-white-50">Uploaded: {{ image.upload_date }}</span>
+                        {% endif %}
+                    </p>
+                    {% endif %}
                 </div>
             </div>
         </div>

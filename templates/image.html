@@ -54,6 +54,11 @@
                 <p>{{ image.taken_date }}</p>
                 {% endif %}
                 
+                {% if image.upload_date %}
+                <h6>Uploaded</h6>
+                <p>{{ image.upload_date }}</p>
+                {% endif %}
+                
                 {% if image.camera_make or image.camera_model or image.focal_length or image.aperture or image.shutter_speed %}
                 <h6>Camera Details</h6>
                 <ul class="list-unstyled">
@@ -149,6 +154,9 @@
     {% endif %}
     {% if image.taken_date %}
     <p><strong>Taken:</strong> {{ image.taken_date }}</p>
+    {% endif %}
+    {% if image.upload_date %}
+    <p><strong>Uploaded:</strong> {{ image.upload_date }}</p>
     {% endif %}
 </div>
 
