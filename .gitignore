@@ -3,3 +3,5 @@ indafoto_crawler.log
 indafoto.db
 .DS_Store
 .cursorrules
+indafoto_explorer.log
+archive_queue.json
