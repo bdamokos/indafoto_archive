@@ -15,8 +15,8 @@ import random
 import hashlib
 import shutil
 from pathlib import Path
-import concurrent.futures
 import fcntl  # For file locking
+import json
 
 # Configure logging
 logging.basicConfig(
@@ -28,6 +28,12 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Global variables for archive submitters
+archive_org_queue = None
+archive_ph_queue = None
+archive_org_submitter = None
+archive_ph_submitter = None
 
 # TODO: Add intelligent resume feature, and error handling (e.g. if we find an error that prevents the middle 20% of the pages from being downloaded, we should skip them and continue from the next page, after the run we would fix the error and the script should find and download the missing images)
 
@@ -174,7 +180,7 @@ def init_db():
     )
     """)
     
-    # Create archive_submissions table
+    # Create archive_submissions table if not exists
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS archive_submissions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -183,9 +189,23 @@ def init_db():
         type TEXT,  -- 'author_page', 'image_page', 'gallery_page'
         status TEXT,
         archive_url TEXT,
-        error TEXT  -- Store error messages
+        error TEXT,  -- Store error messages
+        retry_count INTEGER DEFAULT 0,
+        last_attempt TEXT
     )
     """)
+    
+    # Add retry_count column if it doesn't exist
+    try:
+        cursor.execute("ALTER TABLE archive_submissions ADD COLUMN retry_count INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
+    # Add last_attempt column if it doesn't exist
+    try:
+        cursor.execute("ALTER TABLE archive_submissions ADD COLUMN last_attempt TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     
     # Create failed_pages table to track pages that need retry
     cursor.execute("""
@@ -661,7 +681,8 @@ def download_image(image_url, author):
                     total=total_size,
                     unit='B',
                     unit_scale=True,
-                    desc=f"Downloading {os.path.basename(filename)}"
+                    desc=f"Downloading {os.path.basename(filename)}",
+                    colour='green'
                 ) as pbar:
                     for chunk in response.iter_content(block_size):
                         if not chunk:  # Filter out keep-alive chunks
@@ -720,25 +741,14 @@ def download_image(image_url, author):
         return None, None
 
 class ArchiveSubmitter(threading.Thread):
-    def __init__(self, queue):
+    def __init__(self, queue, service_name):
         super().__init__()
         self.queue = queue
+        self.service_name = service_name
         self.daemon = True
-        self.archive_services = [
-            {
-                'name': 'archive.org',
-                'submit_url': 'https://web.archive.org/save/{}',
-                'view_url': 'https://web.archive.org/web/*/{}',
-                'check_url': 'https://web.archive.org/cdx/search/cdx?url={}&output=json'
-            },
-            {
-                'name': 'archive.ph',
-                'submit_url': 'https://archive.ph/submit/',
-                'view_url': 'https://archive.ph/{}',
-                'check_url': 'https://archive.ph/{}'
-            }
-        ]
-
+        self.running = True
+        self.archive_queue_file = f"archive_queue_{service_name}.json"
+        
     def check_archive_org(self, url):
         """Check if URL is already archived on archive.org."""
         try:
@@ -747,16 +757,10 @@ class ArchiveSubmitter(threading.Thread):
             if response.ok:
                 data = response.json()
                 if len(data) > 1:  # First row is header
-                    # Get the timestamp of the most recent snapshot
-                    # CDX API returns: [urlkey, timestamp, original, mimetype, statuscode, digest, length]
-                    latest_snapshot = data[-1]  # Last entry is the most recent
-                    timestamp = latest_snapshot[1]  # Timestamp is in YYYYMMDDhhmmss format
-                    
-                    # Convert timestamp to datetime
+                    latest_snapshot = data[-1]
+                    timestamp = latest_snapshot[1]
                     snapshot_date = datetime.strptime(timestamp, '%Y%m%d%H%M%S')
-                    cutoff_date = datetime(2024, 7, 1)  # Second half of 2024
-                    
-                    # Return True only if the snapshot is recent enough
+                    cutoff_date = datetime(2024, 7, 1)
                     return snapshot_date >= cutoff_date
             return False
         except Exception as e:
@@ -764,171 +768,241 @@ class ArchiveSubmitter(threading.Thread):
             return False
 
     def check_archive_ph(self, url):
-        """Check if URL is already archived on archive.ph using their Memento API."""
+        """Check if URL is already archived on archive.ph."""
         try:
-            # Use the Memento TimeMap API to check for archived versions
             timemap_url = f"https://archive.ph/timemap/{url}"
-            response = requests.get(timemap_url, timeout=10)
-            
+            response = requests.get(timemap_url, timeout=60)
             if response.ok:
-                # Parse the TimeMap response
-                # Format is: <url>; rel="original",<archive_url>; rel="memento"; datetime="timestamp",...
                 lines = response.text.strip().split('\n')
-                if len(lines) > 1:  # If we have any archived versions
-                    # Get the last line which contains the most recent archive
+                if len(lines) > 1:
                     latest_archive = lines[-1]
-                    # Extract the datetime from the memento line
                     datetime_match = re.search(r'datetime="([^"]+)"', latest_archive)
                     if datetime_match:
-                        # Parse the datetime (format: Thu, 14 Mar 2024 15:30:00 GMT)
                         archive_date = datetime.strptime(datetime_match.group(1), '%a, %d %b %Y %H:%M:%S GMT')
-                        cutoff_date = datetime(2024, 7, 1)  # Second half of 2024
-                        
-                        # Return True only if the archive is recent enough
+                        cutoff_date = datetime(2024, 7, 1)
                         return archive_date >= cutoff_date
-            
             return False
         except Exception as e:
-            logger.error(f"Failed to check archive.ph Memento API for {url}: {e}")
+            logger.error(f"Failed to check archive.ph for {url}: {e}")
             return False
 
-    def submit_to_archive_org(self, url, timeout=60):
-        """Submit URL to archive.org with extended timeout."""
+    def submit_to_archive_org(self, url):
+        """Submit URL to archive.org."""
         try:
-            # First check if already archived
             if self.check_archive_org(url):
-                logger.info(f"URL {url} is already archived on archive.org")
-                return {
-                    'success': True,
-                    'archive_url': f"https://web.archive.org/web/*/{url}"
-                }
-
+                return {'success': True, 'archive_url': f"https://web.archive.org/web/*/{url}"}
+            
             archive_url = f"https://web.archive.org/save/{url}"
-            response = requests.get(archive_url, timeout=timeout)
+            response = requests.get(archive_url, timeout=60)
             return {
                 'success': response.ok,
                 'archive_url': f"https://web.archive.org/web/*/{url}" if response.ok else None
             }
         except Exception as e:
-            logger.error(f"Failed to submit to archive.org: {e}")
             return {'success': False, 'error': str(e)}
 
-    def submit_to_archive_ph(self, url, timeout=60):
-        """Submit URL to archive.ph (formerly archive.is)."""
+    def submit_to_archive_ph(self, url):
+        """Submit URL to archive.ph."""
         try:
-            # First check if already archived using Memento API
             if self.check_archive_ph(url):
-                logger.info(f"URL {url} is already archived on archive.ph")
-                # Use the timegate to get the latest archived version
-                timegate_url = f"https://archive.ph/timegate/{url}"
-                response = requests.get(timegate_url, timeout=timeout, allow_redirects=True)
-                if response.ok:
-                    return {
-                        'success': True,
-                        'archive_url': response.url
-                    }
-                else:
-                    return {
-                        'success': True,
-                        'archive_url': f"https://archive.ph/{url}"  # Fallback to direct URL
-                    }
-
+                return {'success': True, 'archive_url': f"https://archive.ph/{url}"}
+            
             data = {'url': url}
-            response = requests.post('https://archive.ph/submit/', 
-                                  data=data, 
-                                  headers=HEADERS,
-                                  timeout=timeout,
-                                  allow_redirects=True)
+            response = requests.post('https://archive.ph/submit/', data=data, headers=HEADERS, timeout=60)
             
-            # After submission, verify using Memento API
             if response.ok:
-                time.sleep(5)  # Give some time for the archive to process
+                time.sleep(5)
                 if self.check_archive_ph(url):
-                    # Get the actual archive URL using timegate
-                    timegate_url = f"https://archive.ph/timegate/{url}"
-                    archive_response = requests.get(timegate_url, timeout=timeout, allow_redirects=True)
-                    if archive_response.ok:
-                        return {
-                            'success': True,
-                            'archive_url': archive_response.url
-                        }
+                    return {'success': True, 'archive_url': f"https://archive.ph/{url}"}
             
-            logger.warning(f"Failed to archive {url} on archive.ph: Submission verification failed")
-            return {
-                'success': False,
-                'error': 'Submission verification failed'
-            }
+            return {'success': False, 'error': 'Submission verification failed'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    def save_queue(self):
+        """Save pending submissions to file."""
+        try:
+            # Create a temporary list to store items
+            queue_list = []
+            temp_queue = queue.Queue()
+            
+            # Get all items from the queue
+            while True:
+                try:
+                    item = self.queue.get_nowait()
+                    if item is not None:
+                        queue_list.append(item)
+                        temp_queue.put(item)
+                except queue.Empty:
+                    break
+            
+            # Save to file if we have items
+            if queue_list:
+                with open(self.archive_queue_file, 'w') as f:
+                    json.dump(queue_list, f)
+                logger.info(f"Saved {len(queue_list)} items to {self.archive_queue_file}")
+            
+            # Put items back in the original queue
+            while True:
+                try:
+                    item = temp_queue.get_nowait()
+                    self.queue.put(item)
+                except queue.Empty:
+                    break
                 
         except Exception as e:
-            logger.error(f"Failed to submit to archive.ph: {e}")
-            return {'success': False, 'error': str(e)}
+            logger.error(f"Failed to save archive queue to {self.archive_queue_file}: {str(e)}")
+
+    def load_queue(self):
+        """Load pending submissions from file."""
+        try:
+            if os.path.exists(self.archive_queue_file):
+                with open(self.archive_queue_file, 'r') as f:
+                    data = json.load(f)
+                    for item in data:
+                        self.queue.put(item)
+                    logger.info(f"Loaded {len(data)} items from {self.archive_queue_file}")
+        except Exception as e:
+            logger.error(f"Failed to load archive queue: {e}")
 
     def run(self):
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        
-        while True:
-            try:
-                url, url_type = self.queue.get()
-                if url is None:  # Poison pill
-                    break
+        """Main thread loop for processing archive submissions."""
+        conn = None
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            
+            self.load_queue()  # Load pending submissions
+            
+            while self.running:
+                try:
+                    item = self.queue.get(timeout=1)
+                    if item is None:  # Poison pill
+                        self.queue.task_done()
+                        break
                     
-                # Check if already submitted
-                cursor.execute("SELECT archive_url FROM archive_submissions WHERE url = ?", (url,))
-                result = cursor.fetchone()
-                if result and result[0]:
-                    self.queue.task_done()
-                    continue
-
-                # Try each archive service in order until one succeeds
-                archive_url = None
-                status = 'failed'
-                error_messages = []
-                
-                # First try archive.org
-                result = self.submit_to_archive_org(url)
-                if result['success']:
-                    archive_url = result['archive_url']
-                    status = 'success'
-                else:
-                    error_messages.append(f"archive.org: {result.get('error', 'Unknown error')}")
+                    url, url_type = item
+                    if url is None:  # Skip invalid items
+                        self.queue.task_done()
+                        continue
                     
-                    # Try archive.ph as fallback
-                    result = self.submit_to_archive_ph(url)
-                    if result['success']:
-                        archive_url = result['archive_url']
+                    # Check if already submitted successfully
+                    cursor.execute("""
+                        SELECT id, archive_url, retry_count 
+                        FROM archive_submissions 
+                        WHERE url = ?
+                    """, (url,))
+                    result = cursor.fetchone()
+                    
+                    current_retry_count = result[2] if result and len(result) > 2 else 0
+                    
+                    # Submit to appropriate archive service
+                    if self.service_name == 'archive.org':
+                        submission_result = self.submit_to_archive_org(url)
+                    else:  # archive.ph
+                        submission_result = self.submit_to_archive_ph(url)
+                    
+                    if submission_result['success']:
                         status = 'success'
+                        archive_url = submission_result['archive_url']
+                        error = None
                     else:
-                        error_messages.append(f"archive.ph: {result.get('error', 'Unknown error')}")
-
-                # Record the attempt
-                cursor.execute("""
-                    INSERT OR REPLACE INTO archive_submissions (
-                        url, submission_date, type, status, archive_url, error
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                """, (
-                    url,
-                    datetime.now().isoformat(),
-                    url_type,
-                    status,
-                    archive_url,
-                    '; '.join(error_messages) if error_messages else None
-                ))
-                conn.commit()
-                
-                if status == 'success':
-                    logger.info(f"Successfully archived {url} to {archive_url}")
-                else:
-                    logger.warning(f"Failed to archive {url}. Errors: {'; '.join(error_messages)}")
+                        status = 'failed'
+                        archive_url = None
+                        error = submission_result.get('error')
+                        
+                        # If failed, increment retry count and requeue if under limit
+                        current_retry_count += 1
+                        if current_retry_count < 3:  # Maximum 3 retries
+                            logger.info(f"Requeuing {url} for retry {current_retry_count}/3")
+                            self.queue.put((url, url_type))
                     
-                self.queue.task_done()
-                time.sleep(5)  # Rate limit archive submissions
-                
-            except Exception as e:
-                logger.error(f"Error in archive submitter: {e}")
-                continue
-                
-        conn.close()
+                    # Update database
+                    try:
+                        if result:
+                            cursor.execute("""
+                                UPDATE archive_submissions 
+                                SET status = ?, archive_url = ?, error = ?,
+                                    retry_count = ?, last_attempt = ?
+                                WHERE url = ?
+                            """, (
+                                status,
+                                archive_url,
+                                error,
+                                current_retry_count,
+                                datetime.now().isoformat(),
+                                url
+                            ))
+                        else:
+                            cursor.execute("""
+                                INSERT INTO archive_submissions (
+                                    url, submission_date, type, status, archive_url,
+                                    error, retry_count, last_attempt
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                url,
+                                datetime.now().isoformat(),
+                                url_type,
+                                status,
+                                archive_url,
+                                error,
+                                current_retry_count,
+                                datetime.now().isoformat()
+                            ))
+                        conn.commit()
+                    except sqlite3.Error as e:
+                        logger.error(f"Database error while updating archive submission for {url}: {str(e)}")
+                        conn.rollback()
+                    
+                    if status == 'success':
+                        logger.info(f"Successfully archived {url} to {archive_url}")
+                    else:
+                        logger.warning(f"Failed to archive {url}. Error: {error}")
+                    
+                    self.queue.task_done()
+                    self.save_queue()  # Save queue state after each operation
+                    time.sleep(5)  # Rate limiting
+                    
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    logger.error(f"Error processing URL in archive submitter: {str(e)}", exc_info=True)
+                    continue
+                    
+        except Exception as e:
+            logger.error(f"Critical error in archive submitter thread: {str(e)}", exc_info=True)
+        finally:
+            if conn:
+                conn.close()
+
+    def stop(self):
+        """Stop the archive submitter thread."""
+        self.running = False
+        self.save_queue()
+        self.queue.put(None)
+
+def start_archive_submitters():
+    """Start archive submitter threads."""
+    global archive_org_queue, archive_ph_queue, archive_org_submitter, archive_ph_submitter
+    
+    archive_org_queue = queue.Queue()
+    archive_ph_queue = queue.Queue()
+    
+    archive_org_submitter = ArchiveSubmitter(archive_org_queue, 'archive.org')
+    archive_ph_submitter = ArchiveSubmitter(archive_ph_queue, 'archive.ph')
+    
+    archive_org_submitter.start()
+    archive_ph_submitter.start()
+
+def stop_archive_submitters():
+    """Stop archive submitter threads."""
+    if archive_org_submitter:
+        archive_org_submitter.stop()
+        archive_org_submitter.join()
+    
+    if archive_ph_submitter:
+        archive_ph_submitter.stop()
+        archive_ph_submitter.join()
 
 def extract_image_id(url):
     """Extract the unique image ID from an Indafoto URL."""
@@ -1043,7 +1117,6 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                         url = image_data['image_url']
                         high_res_url = get_high_res_url(url)
                         download_url = high_res_url if high_res_url else url
-                        
                         download_queue.put((download_url, metadata))
                     else:
                         error_queue.put(('metadata', image_data['page_url'], "Failed to extract metadata"))
@@ -1180,7 +1253,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 break
         
         # Process database operations in the main thread
-        for local_path, file_hash, url, metadata in tqdm(downloaded_images, desc="Saving to database"):
+        for local_path, file_hash, url, metadata in tqdm(downloaded_images, desc="Saving to database", colour='cyan'):
             try:
                 # Insert image data
                 cursor.execute("""
@@ -1207,6 +1280,46 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 ))
                 
                 image_id = cursor.lastrowid
+
+                # Submit to archive queues if enabled
+                if not args.disable_archive:
+                    # Check and submit author pages if not already archived
+                    if metadata.get('author_url'):
+                        # Check if author page was already archived successfully
+                        cursor.execute("""
+                            SELECT id FROM archive_submissions 
+                            WHERE url = ? AND status = 'success'
+                        """, (metadata['author_url'],))
+                        author_archived = cursor.fetchone() is not None
+
+                        if not author_archived:
+                            logger.info(f"Submitting author pages for archiving: {metadata['author_url']}")
+                            # Submit author profile page
+                            archive_org_queue.put((metadata['author_url'], 'author_page'))
+                            archive_ph_queue.put((metadata['author_url'], 'author_page'))
+                            
+                            # Submit author details page
+                            author_details_url = metadata['author_url'] + "/details"
+                            archive_org_queue.put((author_details_url, 'author_details'))
+                            archive_ph_queue.put((author_details_url, 'author_details'))
+
+                    # Random sampling for image and gallery pages
+                    if random.random() < ARCHIVE_SAMPLE_RATE:
+                        logger.info(f"Selected for archiving: {metadata['page_url']}")
+                        # Submit image page
+                        archive_org_queue.put((metadata['page_url'], 'image_page'))
+                        archive_ph_queue.put((metadata['page_url'], 'image_page'))
+                        
+                        # Submit collection and album pages
+                        for collection in metadata.get('collections', []):
+                            if collection['url']:
+                                archive_org_queue.put((collection['url'], 'gallery_page'))
+                                archive_ph_queue.put((collection['url'], 'gallery_page'))
+                        
+                        for album in metadata.get('albums', []):
+                            if album['url']:
+                                archive_org_queue.put((album['url'], 'gallery_page'))
+                                archive_ph_queue.put((album['url'], 'gallery_page'))
                 
                 # Process collections
                 for gallery in metadata.get('collections', []):
@@ -1340,18 +1453,15 @@ def crawl_images(start_offset=0, enable_archive=False, retry_mode=False):
     total_downloaded_bytes = 0
     pages_processed = 0
     
-    # Initialize archive submission queue and worker if enabled
-    archive_queue = None
-    archive_worker = None
-    if enable_archive:
-        archive_queue = queue.Queue()
-        archive_worker = ArchiveSubmitter(archive_queue)
-        archive_worker.start()
-    
     try:
-        for page in tqdm(range(start_offset, TOTAL_PAGES), desc="Crawling pages"):
+        # Start archive submitters if enabled
+        if enable_archive:
+            start_archive_submitters()
+            logger.info("Archive submitters started")
+        
+        for page in tqdm(range(start_offset, TOTAL_PAGES), desc="Crawling pages", colour='blue'):
             try:
-                # Check if page was already successfully completed
+                # Check if page was already completed successfully
                 cursor.execute("SELECT completion_date FROM completed_pages WHERE page_number = ?", (page,))
                 if cursor.fetchone():
                     logger.info(f"Skipping page {page} - already completed successfully")
@@ -1455,9 +1565,13 @@ def crawl_images(start_offset=0, enable_archive=False, retry_mode=False):
         logger.critical(f"Unexpected error occurred: {e}", exc_info=True)
     finally:
         # Stop archive worker if it was started
-        if enable_archive and archive_worker:
-            archive_queue.put((None, None))
-            archive_worker.join()
+        if enable_archive and archive_org_submitter:
+            archive_org_queue.put((None, None))
+            archive_org_submitter.join()
+        
+        if enable_archive and archive_ph_submitter:
+            archive_ph_queue.put((None, None))
+            archive_ph_submitter.join()
         
         # Print summary of progress
         cursor.execute("SELECT COUNT(*) FROM completed_pages")
@@ -1600,7 +1714,7 @@ def redownload_author_images(author_name):
     failed = 0
     different = 0
     
-    for image in tqdm(images, desc=f"Redownloading images for {author_name}"):
+    for image in tqdm(images, desc=f"Redownloading images for {author_name}", colour='yellow'):
         image_id, url, page_url, old_path, old_hash = image
         
         try:
@@ -1661,7 +1775,7 @@ def redownload_author_images(author_name):
                 new_image_id = cursor.lastrowid
                 
                 # Process galleries
-                for gallery in metadata['collections']:
+                for gallery in metadata.get('collections', []):
                     cursor.execute("""
                         INSERT OR IGNORE INTO collections (collection_id, title, url, is_public)
                         VALUES (?, ?, ?, ?)
@@ -1674,8 +1788,9 @@ def redownload_author_images(author_name):
                         INSERT INTO image_collections (image_id, collection_id)
                         VALUES (?, ?)
                     """, (new_image_id, gallery_db_id))
-
-                for gallery in metadata['albums']:
+                
+                # Process albums
+                for gallery in metadata.get('albums', []):
                     cursor.execute("""
                         INSERT OR IGNORE INTO albums (album_id, title, url, is_public)
                         VALUES (?, ?, ?, ?)
@@ -1764,6 +1879,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     try:
+        # Start archive submitters if enabled
+        if not args.disable_archive:
+            start_archive_submitters()
+        
         if args.redownload_author:
             redownload_author_images(args.redownload_author)
         elif args.test:
@@ -1778,3 +1897,6 @@ if __name__ == "__main__":
                         retry_mode=args.retry)
     except Exception as e:
         logger.critical(f"Unexpected error occurred: {e}", exc_info=True)
+    finally:
+        if not args.disable_archive:
+            stop_archive_submitters()

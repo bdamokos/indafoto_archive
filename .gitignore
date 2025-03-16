@@ -6,3 +6,5 @@ indafoto.db
 indafoto_explorer.log
 archive_queue.json
 verify_downloads.log
+archive_queue_archive.ph.json
+archive_queue_archive.org.json
