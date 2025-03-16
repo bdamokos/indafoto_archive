@@ -29,14 +29,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global variables for archive submitters
-archive_org_queue = None
-archive_ph_queue = None
-archive_org_submitter = None
-archive_ph_submitter = None
-
-# TODO: Add intelligent resume feature, and error handling (e.g. if we find an error that prevents the middle 20% of the pages from being downloaded, we should skip them and continue from the next page, after the run we would fix the error and the script should find and download the missing images)
-
 # Configurations
 # If you want to save images with different characteristics, you can change the search URL template and the total number of pages.
 SEARCH_URL_TEMPLATE = "https://indafoto.hu/search/list?profile=main&sphinx=1&search=advanced&textsearch=fulltext&textuser=&textmap=&textcompilation=&photo=&datefrom=&dateto=&licence%5B1%5D=I1%3BI2%3BII1%3BII2&licence%5B2%5D=I1%3BI2%3BI3&page_offset={}"
@@ -660,7 +652,7 @@ def download_image(image_url, author):
                     # Get an exclusive lock
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except IOError:
-                    # Another thread has the lock
+                    # Another thread is downloading this file
                     logger.warning(f"Another thread is downloading {filename}, skipping")
                     return None, None
                 
@@ -981,29 +973,6 @@ class ArchiveSubmitter(threading.Thread):
         self.save_queue()
         self.queue.put(None)
 
-def start_archive_submitters():
-    """Start archive submitter threads."""
-    global archive_org_queue, archive_ph_queue, archive_org_submitter, archive_ph_submitter
-    
-    archive_org_queue = queue.Queue()
-    archive_ph_queue = queue.Queue()
-    
-    archive_org_submitter = ArchiveSubmitter(archive_org_queue, 'archive.org')
-    archive_ph_submitter = ArchiveSubmitter(archive_ph_queue, 'archive.ph')
-    
-    archive_org_submitter.start()
-    archive_ph_submitter.start()
-
-def stop_archive_submitters():
-    """Stop archive submitter threads."""
-    if archive_org_submitter:
-        archive_org_submitter.stop()
-        archive_org_submitter.join()
-    
-    if archive_ph_submitter:
-        archive_ph_submitter.stop()
-        archive_ph_submitter.join()
-
 def extract_image_id(url):
     """Extract the unique image ID from an Indafoto URL."""
     # The URL format is like: .../68973_42b3ac220f8b136347cfc067e6cf2b05/27113791_7f3d073a...
@@ -1280,46 +1249,6 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 ))
                 
                 image_id = cursor.lastrowid
-
-                # Submit to archive queues if enabled
-                if not args.disable_archive:
-                    # Check and submit author pages if not already archived
-                    if metadata.get('author_url'):
-                        # Check if author page was already archived successfully
-                        cursor.execute("""
-                            SELECT id FROM archive_submissions 
-                            WHERE url = ? AND status = 'success'
-                        """, (metadata['author_url'],))
-                        author_archived = cursor.fetchone() is not None
-
-                        if not author_archived:
-                            logger.info(f"Submitting author pages for archiving: {metadata['author_url']}")
-                            # Submit author profile page
-                            archive_org_queue.put((metadata['author_url'], 'author_page'))
-                            archive_ph_queue.put((metadata['author_url'], 'author_page'))
-                            
-                            # Submit author details page
-                            author_details_url = metadata['author_url'] + "/details"
-                            archive_org_queue.put((author_details_url, 'author_details'))
-                            archive_ph_queue.put((author_details_url, 'author_details'))
-
-                    # Random sampling for image and gallery pages
-                    if random.random() < ARCHIVE_SAMPLE_RATE:
-                        logger.info(f"Selected for archiving: {metadata['page_url']}")
-                        # Submit image page
-                        archive_org_queue.put((metadata['page_url'], 'image_page'))
-                        archive_ph_queue.put((metadata['page_url'], 'image_page'))
-                        
-                        # Submit collection and album pages
-                        for collection in metadata.get('collections', []):
-                            if collection['url']:
-                                archive_org_queue.put((collection['url'], 'gallery_page'))
-                                archive_ph_queue.put((collection['url'], 'gallery_page'))
-                        
-                        for album in metadata.get('albums', []):
-                            if album['url']:
-                                archive_org_queue.put((album['url'], 'gallery_page'))
-                                archive_ph_queue.put((album['url'], 'gallery_page'))
                 
                 # Process collections
                 for gallery in metadata.get('collections', []):
@@ -1440,7 +1369,7 @@ def estimate_space_requirements(downloaded_bytes, pages_processed, total_pages):
         'total_estimated_gb': (downloaded_bytes + estimated_remaining_bytes) / (2**30)
     }
 
-def crawl_images(start_offset=0, enable_archive=False, retry_mode=False):
+def crawl_images(start_offset=0, retry_mode=False):
     """Main function to crawl images and save metadata."""
     conn = init_db()
     cursor = conn.cursor()
@@ -1454,11 +1383,6 @@ def crawl_images(start_offset=0, enable_archive=False, retry_mode=False):
     pages_processed = 0
     
     try:
-        # Start archive submitters if enabled
-        if enable_archive:
-            start_archive_submitters()
-            logger.info("Archive submitters started")
-        
         for page in tqdm(range(start_offset, TOTAL_PAGES), desc="Crawling pages", colour='blue'):
             try:
                 # Check if page was already completed successfully
@@ -1564,15 +1488,6 @@ def crawl_images(start_offset=0, enable_archive=False, retry_mode=False):
     except Exception as e:
         logger.critical(f"Unexpected error occurred: {e}", exc_info=True)
     finally:
-        # Stop archive worker if it was started
-        if enable_archive and archive_org_submitter:
-            archive_org_queue.put((None, None))
-            archive_org_submitter.join()
-        
-        if enable_archive and archive_ph_submitter:
-            archive_ph_queue.put((None, None))
-            archive_ph_submitter.join()
-        
         # Print summary of progress
         cursor.execute("SELECT COUNT(*) FROM completed_pages")
         completed_count = cursor.fetchone()[0]
@@ -1864,8 +1779,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Indafoto Crawler')
     parser.add_argument('--start-offset', type=int, default=0,
                        help='Page offset to start crawling from')
-    parser.add_argument('--disable-archive', action='store_true',
-                       help='Disable Internet Archive submissions (enabled by default)')
     parser.add_argument('--retry', action='store_true',
                        help='Retry failed pages instead of normal crawling')
     parser.add_argument('--test', action='store_true',
@@ -1879,10 +1792,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     try:
-        # Start archive submitters if enabled
-        if not args.disable_archive:
-            start_archive_submitters()
-        
         if args.redownload_author:
             redownload_author_images(args.redownload_author)
         elif args.test:
@@ -1893,10 +1802,6 @@ if __name__ == "__main__":
             test_camera_extraction()
         else:
             crawl_images(start_offset=args.start_offset, 
-                        enable_archive=not args.disable_archive,
                         retry_mode=args.retry)
     except Exception as e:
         logger.critical(f"Unexpected error occurred: {e}", exc_info=True)
-    finally:
-        if not args.disable_archive:
-            stop_archive_submitters()
