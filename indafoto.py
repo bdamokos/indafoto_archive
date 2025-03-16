@@ -595,18 +595,53 @@ class ArchiveSubmitter(threading.Thread):
             {
                 'name': 'archive.org',
                 'submit_url': 'https://web.archive.org/save/{}',
-                'view_url': 'https://web.archive.org/web/*/{}'
+                'view_url': 'https://web.archive.org/web/*/{}',
+                'check_url': 'https://web.archive.org/cdx/search/cdx?url={}&output=json'
             },
             {
                 'name': 'archive.ph',
                 'submit_url': 'https://archive.ph/submit/',
-                'view_url': 'https://archive.ph/{}'
+                'view_url': 'https://archive.ph/{}',
+                'check_url': 'https://archive.ph/{}'
             }
         ]
+
+    def check_archive_org(self, url):
+        """Check if URL is already archived on archive.org."""
+        try:
+            check_url = f"https://web.archive.org/cdx/search/cdx?url={url}&output=json"
+            response = requests.get(check_url, timeout=10)
+            if response.ok:
+                data = response.json()
+                # If we have at least one snapshot, the page is archived
+                return len(data) > 1  # First row is header
+            return False
+        except Exception as e:
+            logger.error(f"Failed to check archive.org for {url}: {e}")
+            return False
+
+    def check_archive_ph(self, url):
+        """Check if URL is already archived on archive.ph."""
+        try:
+            check_url = f"https://archive.ph/{url}"
+            response = requests.head(check_url, timeout=10, allow_redirects=True)
+            # If we get redirected to an archive.ph URL, it's archived
+            return response.ok and 'archive.ph' in response.url
+        except Exception as e:
+            logger.error(f"Failed to check archive.ph for {url}: {e}")
+            return False
 
     def submit_to_archive_org(self, url, timeout=60):
         """Submit URL to archive.org with extended timeout."""
         try:
+            # First check if already archived
+            if self.check_archive_org(url):
+                logger.info(f"URL {url} is already archived on archive.org")
+                return {
+                    'success': True,
+                    'archive_url': f"https://web.archive.org/web/*/{url}"
+                }
+
             archive_url = f"https://web.archive.org/save/{url}"
             response = requests.get(archive_url, timeout=timeout)
             return {
@@ -620,6 +655,14 @@ class ArchiveSubmitter(threading.Thread):
     def submit_to_archive_ph(self, url, timeout=30):
         """Submit URL to archive.ph (formerly archive.is)."""
         try:
+            # First check if already archived
+            if self.check_archive_ph(url):
+                logger.info(f"URL {url} is already archived on archive.ph")
+                return {
+                    'success': True,
+                    'archive_url': f"https://archive.ph/{url}"
+                }
+
             data = {'url': url}
             headers = {
                 'User-Agent': HEADERS['User-Agent'],
@@ -1099,8 +1142,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Indafoto Crawler')
     parser.add_argument('--start-offset', type=int, default=0,
                        help='Page offset to start crawling from')
-    parser.add_argument('--enable-archive', action='store_true',
-                       help='Enable Internet Archive submissions (disabled by default)')
+    parser.add_argument('--disable-archive', action='store_true',
+                       help='Disable Internet Archive submissions (enabled by default)')
     parser.add_argument('--retry', action='store_true',
                        help='Retry failed pages instead of normal crawling')
     parser.add_argument('--test', action='store_true',
@@ -1112,7 +1155,7 @@ if __name__ == "__main__":
             test_album_extraction()
         else:
             crawl_images(start_offset=args.start_offset, 
-                        enable_archive=args.enable_archive,
+                        enable_archive=not args.disable_archive,
                         retry_mode=args.retry)
     except Exception as e:
         logger.critical(f"Unexpected error occurred: {e}", exc_info=True)
