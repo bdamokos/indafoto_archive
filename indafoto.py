@@ -1031,52 +1031,68 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
     skipped_count = 0
     
     try:
-        # First pass: collect download tasks and check for duplicates
+        # First pass: collect image IDs and check for duplicates
+        image_ids_to_process = []
         for image_data in image_data_list:
             try:
-                page_url = image_data.get('page_url')
-                if not page_url:
-                    logger.warning("Skipping image with no page URL")
-                    failed_count += 1
-                    continue
-                    
-                # Extract metadata and prepare download task
-                metadata = extract_metadata(page_url)
-                if not metadata:
-                    logger.warning(f"Failed to extract metadata from {page_url}")
+                url = image_data.get('image_url', '')
+                page_url = image_data.get('page_url', '')
+                
+                if not url or not page_url:
+                    logger.warning("Skipping image with no URL or page URL")
                     failed_count += 1
                     continue
                 
-                # Get image URL from metadata or image_data
-                url = image_data.get('image_url')
-                if not url:
-                    logger.warning(f"No image URL found for {page_url}")
+                # Extract image ID from URL
+                image_id = extract_image_id(url)
+                if not image_id:
+                    logger.warning(f"Could not extract image ID from URL: {url}")
                     failed_count += 1
                     continue
                 
-                # Try to get high-res version URL before checking duplicates
-                high_res_url = get_high_res_url(url)
-                download_url = high_res_url if high_res_url else url
-                
-                # Check if any version of this image already exists
+                # Check if we already have this image in our database
                 cursor.execute("""
-                    SELECT id, local_path 
-                    FROM images 
-                    WHERE url IN (?, ?, ?)
-                """, (download_url, url, url.replace('_l.jpg', '_xl.jpg')))
+                    SELECT i.id, i.local_path, i.author 
+                    FROM images i 
+                    WHERE i.url LIKE ?
+                """, (f"%{image_id}%",))
                 existing = cursor.fetchone()
                 
                 if existing:
-                    logger.info(f"Image already exists (ID: {existing[0]}, path: {existing[1]}), skipping...")
+                    logger.info(f"Image ID {image_id} already exists (ID: {existing[0]}, path: {existing[1]}), skipping...")
                     skipped_count += 1
                     processed_count += 1  # Count as processed since it's already in our archive
                     
-                    # Still update author counts for statistics
-                    author = metadata.get('author', 'unknown')
+                    # Update author counts for statistics
+                    author = existing[2]
                     author_image_counts[author] = author_image_counts.get(author, 0) + 1
                     continue
                 
-                # Add to download tasks if not a duplicate
+                # If we don't have it, add it to the list to process
+                image_ids_to_process.append((image_id, image_data))
+            except Exception as e:
+                logger.error(f"Error checking image: {e}")
+                failed_count += 1
+                continue
+        
+        logger.info(f"Found {len(image_ids_to_process)} new images to process, {skipped_count} duplicates skipped")
+        
+        # Second pass: get metadata only for new images
+        for image_id, image_data in image_ids_to_process:
+            try:
+                # Extract metadata only for new images
+                metadata = extract_metadata(image_data['page_url'])
+                if not metadata:
+                    logger.warning(f"Failed to extract metadata from {image_data['page_url']}")
+                    failed_count += 1
+                    continue
+                
+                # Try to get high-res version URL
+                url = image_data['image_url']
+                high_res_url = get_high_res_url(url)
+                download_url = high_res_url if high_res_url else url
+                
+                # Add to download tasks
                 download_tasks.append((download_url, metadata))
                 
                 # Update author count
@@ -1088,9 +1104,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 failed_count += 1
                 continue
         
-        logger.info(f"Found {len(download_tasks)} new images to download, {skipped_count} duplicates skipped")
-        
-        # Second pass: parallel download and process only new images
+        # Third pass: parallel download and process only new images
         with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
             future_to_task = {
                 executor.submit(download_image, url, metadata['author']): (url, metadata)
