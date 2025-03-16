@@ -945,7 +945,7 @@ def process_image_list(image_data_list, conn, cursor, archive_queue=None, attemp
                     uuid, url, local_path, sha256_hash, title, author, author_url,
                     license, camera_make, camera_model, focal_length, aperture,
                     shutter_speed, taken_date, page_url
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 image_uuid, download_url, local_path, file_hash, metadata['title'],
                 metadata['author'], metadata['author_url'], metadata['license'],
