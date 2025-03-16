@@ -81,6 +81,7 @@ def init_db():
         author_url TEXT,
         license TEXT,
         camera_make TEXT,
+        camera_model TEXT,  -- New column for camera model
         focal_length TEXT,
         aperture TEXT,
         shutter_speed TEXT,
@@ -88,6 +89,12 @@ def init_db():
         page_url TEXT
     )
     """)
+    
+    # Add camera_model column if it doesn't exist (for backwards compatibility)
+    try:
+        cursor.execute("ALTER TABLE images ADD COLUMN camera_model TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     
     # Add sha256_hash column if it doesn't exist (for backwards compatibility)
     try:
@@ -491,6 +498,30 @@ def extract_metadata(photo_page_url, attempt=1):
                     value = cols[1].text.strip()
                     exif_data[key] = value
 
+        # Extract camera make and model from the manufacturer link
+        camera_make = None
+        camera_model = None
+        if 'Gyártó' in exif_data:
+            manufacturer_link = soup.find('a', href=lambda x: x and '/fenykepezogep/' in x)
+            if manufacturer_link:
+                href = manufacturer_link.get('href', '')
+                full_text = manufacturer_link.get_text(strip=True)
+                # Extract make and model from href (e.g., /fenykepezogep/apple/iphone_se_(2nd_generation))
+                parts = href.split('/')
+                if len(parts) >= 4:  # We expect at least 4 parts: ['', 'fenykepezogep', 'make', 'model']
+                    # Find the position in the full text where the model part starts
+                    # by looking for the first character after the make name
+                    make_part = parts[2]
+                    # Find the position in the full text where the make part ends
+                    # This will be the first space after the make name
+                    make_end_pos = len(make_part)
+                    # Split the full text at this position
+                    camera_make = full_text[:make_end_pos].strip()
+                    camera_model = full_text[make_end_pos:].strip()
+            else:
+                # Fallback to using the raw text if no link found
+                camera_make = exif_data['Gyártó']
+
         # Extract taken date from EXIF
         taken_date = None
         if 'Készült' in exif_data:
@@ -531,7 +562,8 @@ def extract_metadata(photo_page_url, attempt=1):
             'license': license_info,
             'collections': collections,
             'albums': albums,
-            'camera_make': exif_data.get('Gyártó'),
+            'camera_make': camera_make,
+            'camera_model': camera_model,
             'focal_length': exif_data.get('Fókusztáv'),
             'aperture': exif_data.get('Rekesz'),
             'shutter_speed': exif_data.get('Zársebesség'),
@@ -911,13 +943,13 @@ def process_image_list(image_data_list, conn, cursor, archive_queue=None, attemp
             cursor.execute("""
                 INSERT INTO images (
                     uuid, url, local_path, sha256_hash, title, author, author_url,
-                    license, camera_make, focal_length, aperture,
+                    license, camera_make, camera_model, focal_length, aperture,
                     shutter_speed, taken_date, page_url
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 image_uuid, download_url, local_path, file_hash, metadata['title'],
                 metadata['author'], metadata['author_url'], metadata['license'],
-                metadata['camera_make'], metadata['focal_length'],
+                metadata['camera_make'], metadata['camera_model'], metadata['focal_length'],
                 metadata['aperture'], metadata['shutter_speed'],
                 metadata['taken_date'], photo_page_url
             ))
@@ -1174,6 +1206,35 @@ def test_tag_extraction():
     else:
         print("Failed to extract metadata from URL")
 
+def test_camera_extraction():
+    """Test function to verify camera make and model extraction from specific pages."""
+    test_cases = [
+        {
+            'url': 'https://indafoto.hu/jani58/image/27055949-52959d03',
+            'expected_make': 'SONY',
+            'expected_model': 'DSC-HX350'
+        },
+        {
+            'url': 'https://indafoto.hu/yegenye/image/27024997-bb54932f',
+            'expected_make': 'Apple',
+            'expected_model': 'iPhone SE (2nd generation)'
+        }
+    ]
+    
+    print("\nTesting camera make and model extraction:")
+    for case in test_cases:
+        print(f"\nTesting URL: {case['url']}")
+        metadata = extract_metadata(case['url'])
+        if metadata:
+            print(f"Extracted make: '{metadata['camera_make']}'")
+            print(f"Extracted model: '{metadata['camera_model']}'")
+            print(f"Expected make: '{case['expected_make']}'")
+            print(f"Expected model: '{case['expected_model']}'")
+            print(f"Make matches: {metadata['camera_make'] == case['expected_make']}")
+            print(f"Model matches: {metadata['camera_model'] == case['expected_model']}")
+        else:
+            print("Failed to extract metadata from URL")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Indafoto Crawler')
     parser.add_argument('--start-offset', type=int, default=0,
@@ -1186,6 +1247,8 @@ if __name__ == "__main__":
                        help='Run test function instead of crawler')
     parser.add_argument('--test-tags', action='store_true',
                        help='Run tag extraction test')
+    parser.add_argument('--test-camera', action='store_true',
+                       help='Run camera make/model extraction test')
     args = parser.parse_args()
     
     try:
@@ -1193,6 +1256,8 @@ if __name__ == "__main__":
             test_album_extraction()
         elif args.test_tags:
             test_tag_extraction()
+        elif args.test_camera:
+            test_camera_extraction()
         else:
             crawl_images(start_offset=args.start_offset, 
                         enable_archive=not args.disable_archive,
