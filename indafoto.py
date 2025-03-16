@@ -1245,7 +1245,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                                      author_url, license, camera_make, camera_model, 
                                      focal_length, aperture, shutter_speed, taken_date, 
                                      upload_date, page_url)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     url,
                     local_path,
@@ -1693,7 +1693,7 @@ def redownload_author_images(author_name):
                         url, local_path, sha256_hash, title, author, author_url,
                         license, camera_make, camera_model, focal_length, aperture,
                         shutter_speed, taken_date, upload_date, page_url
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     url, new_path, new_hash, metadata['title'],
                     metadata['author'], metadata['author_url'], metadata['license'],
