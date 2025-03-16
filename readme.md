@@ -148,7 +148,7 @@ If you don't have Python installed:
 
 3. Open your web browser and navigate to:
    ```
-   http://localhost:5000
+   http://localhost:5001
    ```
 
 ### Features
@@ -237,6 +237,6 @@ If you encounter any issues:
 6. If the Archive Explorer fails to start:
    - Ensure Flask is installed (`pip install flask`)
    - Check if the database file exists
-   - Verify port 5000 is not in use
+   - Verify port 5001 is not in use
 
 If problems persist, please report the issue with the error message from the log file.
