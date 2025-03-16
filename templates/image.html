@@ -54,11 +54,16 @@
                 <p>{{ image.taken_date }}</p>
                 {% endif %}
                 
-                {% if image.camera_make or image.focal_length or image.aperture or image.shutter_speed %}
+                {% if image.camera_make or image.camera_model or image.focal_length or image.aperture or image.shutter_speed %}
                 <h6>Camera Details</h6>
                 <ul class="list-unstyled">
-                    {% if image.camera_make %}
-                    <li><small>Camera: {{ image.camera_make }}{% if image.camera_model %} {{ image.camera_model }}{% endif %}</small></li>
+                    {% if image.camera_make or image.camera_model %}
+                    <li>
+                        <small>
+                            {% if image.camera_make %}<span class="camera-make">{{ image.camera_make }}</span>{% endif %}
+                            {% if image.camera_model %}<span class="camera-model text-muted">{{ image.camera_model }}</span>{% endif %}
+                        </small>
+                    </li>
                     {% endif %}
                     {% if image.focal_length %}
                     <li><small>Focal Length: {{ image.focal_length }}</small></li>
@@ -126,8 +131,12 @@
     <p><strong>Title:</strong> {{ image.title }}</p>
     <p><strong>Author:</strong> <a href="{{ url_for('author_gallery', author_name=image.author) }}">{{ image.author }}</a></p>
     <p><strong>License:</strong> {{ image.license }}</p>
-    {% if image.camera_make %}
-    <p><strong>Camera:</strong> {{ image.camera_make }}{% if image.camera_model %} {{ image.camera_model }}{% endif %}</p>
+    {% if image.camera_make or image.camera_model %}
+    <p>
+        <strong>Camera:</strong>
+        {% if image.camera_make %}<span class="camera-make">{{ image.camera_make }}</span>{% endif %}
+        {% if image.camera_model %}<span class="camera-model text-muted">{{ image.camera_model }}</span>{% endif %}
+    </p>
     {% endif %}
     {% if image.focal_length %}
     <p><strong>Focal Length:</strong> {{ image.focal_length }}</p>
