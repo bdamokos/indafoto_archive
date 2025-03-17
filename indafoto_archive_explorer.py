@@ -729,31 +729,6 @@ def mark_image():
                 INSERT INTO marked_images (image_id, marked_date)
                 VALUES (?, ?)
             """, (image_id, datetime.now().isoformat()))
-            
-            # If marking an image and before deletion date, queue for archiving
-            if should_archive():
-                logger.info(f"Archiving is enabled, getting image details for {image_id}")
-                # Get image details
-                cursor.execute("SELECT page_url, author_url FROM images WHERE id = ?", (image_id,))
-                image = cursor.fetchone()
-                
-                if image:
-                    logger.info(f"Found image details: page_url={image['page_url']}, author_url={image['author_url']}")
-                    # Queue image page for archiving
-                    logger.info(f"Queueing image page for archiving: {image['page_url']}")
-                    archive_queue.put((image['page_url'], 'image_page'))
-                    
-                    # Queue author page if available
-                    if image['author_url']:
-                        logger.info(f"Queueing author page for archiving: {image['author_url']}")
-                        archive_queue.put((image['author_url'], 'author_page'))
-                        
-                    # Save queue immediately after adding items
-                    save_archive_queue()
-                else:
-                    logger.warning(f"No image found with ID {image_id}")
-            else:
-                logger.info("Archiving is disabled, skipping archive submission")
         else:
             logger.info(f"Unmarking image {image_id}")
             # Delete all records for this image
