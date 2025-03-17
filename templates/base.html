@@ -228,27 +228,38 @@
         // Favorite authors management
         async function toggleFavoriteAuthor(authorName, starElement) {
             try {
-                const response = await fetch('/api/favorite_authors', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        author_name: authorName,
-                        priority: 0  // Default priority
-                    })
-                });
+                const icon = starElement.querySelector('i');
+                const isFavorite = icon.classList.contains('fas');
+                
+                let response;
+                if (isFavorite) {
+                    // Remove from favorites
+                    response = await fetch(`/api/favorite_authors/${encodeURIComponent(authorName)}`, {
+                        method: 'DELETE'
+                    });
+                } else {
+                    // Add to favorites
+                    response = await fetch('/api/favorite_authors', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            author_name: authorName,
+                            priority: 0  // Default priority
+                        })
+                    });
+                }
                 
                 if (response.ok) {
-                    const icon = starElement.querySelector('i');
-                    if (icon.classList.contains('far')) {
-                        icon.classList.remove('far');
-                        icon.classList.add('fas');
-                        icon.style.color = '#ffc107';
-                    } else {
+                    if (isFavorite) {
                         icon.classList.remove('fas');
                         icon.classList.add('far');
                         icon.style.color = '#6c757d';
+                    } else {
+                        icon.classList.remove('far');
+                        icon.classList.add('fas');
+                        icon.style.color = '#ffc107';
                     }
                 } else {
                     const data = await response.json();
