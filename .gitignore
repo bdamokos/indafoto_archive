@@ -9,3 +9,6 @@ verify_downloads.log
 archive_queue_archive.ph.json
 archive_queue_archive.org.json
 archive_submitter.log
+worker_optimization.log
+worker_optimization.json
+__pycache__/
