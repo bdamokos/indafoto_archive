@@ -60,14 +60,24 @@
         <div class="col-md-6">
             <div class="card">
                 <div class="card-body">
-                    <h5 class="card-title">Most Active Authors</h5>
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h5 class="card-title mb-0">Most Active Authors</h5>
+                        <a href="{{ url_for('browse_authors') }}" class="btn btn-primary btn-sm">Browse All Authors</a>
+                    </div>
                     <ul class="list-group list-group-flush">
-                        {% for author in stats.top_authors %}
+                        {% for author in stats.all_authors[:5] %}
                         <li class="list-group-item d-flex justify-content-between align-items-center">
-                            <a href="{{ url_for('browse_images', author=author.author) }}" class="text-decoration-none">
-                                {{ author.author }}
+                            <a href="{{ url_for('browse_images', author=author.name) }}" class="text-decoration-none">
+                                {{ author.name }}
                             </a>
-                            <span class="badge bg-primary rounded-pill">{{ author.image_count }}</span>
+                            <div class="d-flex align-items-center">
+                                <span class="badge bg-primary rounded-pill me-2">{{ author.count }}</span>
+                                <button onclick="toggleFavoriteAuthor('{{ author.name }}', this)" 
+                                        class="favorite-star btn btn-link p-0"
+                                        data-author="{{ author.name }}">
+                                    <i class="far fa-star"></i>
+                                </button>
+                            </div>
                         </li>
                         {% endfor %}
                     </ul>
@@ -93,4 +103,27 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Initialize favorite stars
+    document.addEventListener('DOMContentLoaded', async function() {
+        const stars = document.querySelectorAll('.favorite-star');
+        for (const star of stars) {
+            const authorName = star.dataset.author;
+            const isFavorite = await checkFavoriteStatus(authorName);
+            const icon = star.querySelector('i');
+            if (isFavorite) {
+                icon.classList.remove('far');
+                icon.classList.add('fas');
+                icon.style.color = '#ffc107';
+            } else {
+                icon.classList.remove('fas');
+                icon.classList.add('far');
+                icon.style.color = '#6c757d';
+            }
+        }
+    });
+</script>
 {% endblock %} 

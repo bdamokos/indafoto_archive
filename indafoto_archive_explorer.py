@@ -410,6 +410,17 @@ def init_db():
     )
     """)
     
+    # Create table for favorite authors
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS favorite_authors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        author_name TEXT UNIQUE,
+        added_date TEXT,
+        priority INTEGER DEFAULT 0,
+        last_processed_date TEXT
+    )
+    """)
+    
     # Migrate existing notes to the new table
     try:
         cursor.execute("""
@@ -434,55 +445,41 @@ def init_db():
 
 @app.route('/')
 def index():
-    """Home page with statistics and navigation options."""
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    # Gather statistics
-    stats = {}
-    
-    # Total images
-    cursor.execute("SELECT COUNT(*) as count FROM images")
-    stats['total_images'] = cursor.fetchone()['count']
-    
-    # Total authors
-    cursor.execute("SELECT COUNT(DISTINCT author) as count FROM images")
-    stats['total_authors'] = cursor.fetchone()['count']
-    
-    # Total collections
-    cursor.execute("SELECT COUNT(*) as count FROM collections")
-    stats['total_collections'] = cursor.fetchone()['count']
-    
-    # Total albums
-    cursor.execute("SELECT COUNT(*) as count FROM albums")
-    stats['total_albums'] = cursor.fetchone()['count']
-    
-    # Total tags
-    cursor.execute("SELECT COUNT(*) as count FROM tags")
-    stats['total_tags'] = cursor.fetchone()['count']
-    
-    # Most active authors (top 5)
-    cursor.execute("""
-        SELECT author, COUNT(*) as image_count 
-        FROM images 
-        GROUP BY author 
-        ORDER BY image_count DESC 
-        LIMIT 5
-    """)
-    stats['top_authors'] = cursor.fetchall()
-    
-    # Most used tags (top 5)
-    cursor.execute("""
-        SELECT t.name, COUNT(it.image_id) as usage_count
-        FROM tags t
-        JOIN image_tags it ON t.id = it.tag_id
-        GROUP BY t.id
-        ORDER BY usage_count DESC
-        LIMIT 5
-    """)
-    stats['top_tags'] = cursor.fetchall()
-    
-    conn.close()
+    with get_db() as db:
+        # Get total counts
+        total_images = db.execute('SELECT COUNT(*) as count FROM images').fetchone()['count']
+        total_authors = db.execute('SELECT COUNT(DISTINCT author) as count FROM images').fetchone()['count']
+        total_collections = db.execute('SELECT COUNT(*) as count FROM collections').fetchone()['count']
+        total_albums = db.execute('SELECT COUNT(*) as count FROM albums').fetchone()['count']
+        total_tags = db.execute('SELECT COUNT(*) as count FROM tags').fetchone()['count']
+
+        # Get all authors with their image counts
+        all_authors = db.execute('''
+            SELECT author as name, COUNT(*) as count 
+            FROM images 
+            GROUP BY author 
+            ORDER BY count DESC
+        ''').fetchall()
+
+        # Get top tags
+        top_tags = db.execute('''
+            SELECT t.name, COUNT(it.image_id) as usage_count
+            FROM tags t
+            JOIN image_tags it ON t.id = it.tag_id
+            GROUP BY t.id, t.name
+            ORDER BY usage_count DESC
+            LIMIT 20
+        ''').fetchall()
+
+        stats = {
+            'total_images': total_images,
+            'total_authors': total_authors,
+            'total_collections': total_collections,
+            'total_albums': total_albums,
+            'total_tags': total_tags,
+            'all_authors': all_authors,
+            'top_tags': top_tags
+        }
     return render_template('index.html', stats=stats)
 
 @app.route('/images')
@@ -1151,6 +1148,140 @@ def browse_collections():
                          stats=stats,
                          page=page,
                          total_pages=total_pages)
+
+@app.route('/api/favorite_authors', methods=['GET'])
+def get_favorite_authors():
+    """Get list of favorite authors with their status."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute("""
+            SELECT fa.*, 
+                   COUNT(DISTINCT i.id) as total_images,
+                   COUNT(DISTINCT CASE WHEN a.status = 'success' THEN i.id END) as archived_images
+            FROM favorite_authors fa
+            LEFT JOIN images i ON fa.author_name = i.author
+            LEFT JOIN archive_submissions a ON i.page_url = a.url
+            GROUP BY fa.id
+            ORDER BY fa.priority DESC, fa.last_processed_date NULLS FIRST
+        """)
+        authors = cursor.fetchall()
+        
+        return jsonify({
+            'authors': [dict(author) for author in authors]
+        })
+    except Exception as e:
+        logger.error(f"Error getting favorite authors: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route('/api/favorite_authors', methods=['POST'])
+def add_favorite_author():
+    """Add a new favorite author."""
+    data = request.get_json()
+    author_name = data.get('author_name')
+    priority = data.get('priority', 0)
+    
+    if not author_name:
+        return jsonify({'error': 'Author name is required'}), 400
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        # Check if author exists in images table
+        cursor.execute("SELECT COUNT(*) FROM images WHERE author = ?", (author_name,))
+        if cursor.fetchone()[0] == 0:
+            return jsonify({'error': 'Author not found in images table'}), 404
+        
+        # Add to favorite authors
+        cursor.execute("""
+            INSERT INTO favorite_authors (author_name, added_date, priority)
+            VALUES (?, datetime('now'), ?)
+            ON CONFLICT(author_name) DO UPDATE SET
+                priority = excluded.priority,
+                last_processed_date = NULL  -- Reset last processed date to trigger reprocessing
+        """, (author_name, priority))
+        
+        conn.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"Error adding favorite author: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route('/api/favorite_authors/<path:author_name>', methods=['DELETE'])
+def remove_favorite_author(author_name):
+    """Remove a favorite author."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute("DELETE FROM favorite_authors WHERE author_name = ?", (author_name,))
+        conn.commit()
+        
+        if cursor.rowcount == 0:
+            return jsonify({'error': 'Author not found in favorites'}), 404
+            
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"Error removing favorite author: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route('/api/favorite_authors/<path:author_name>', methods=['PATCH'])
+def update_favorite_author(author_name):
+    """Update a favorite author's priority."""
+    data = request.get_json()
+    priority = data.get('priority')
+    
+    if priority is None:
+        return jsonify({'error': 'Priority is required'}), 400
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute("""
+            UPDATE favorite_authors 
+            SET priority = ?, last_processed_date = NULL  -- Reset last processed date to trigger reprocessing
+            WHERE author_name = ?
+        """, (priority, author_name))
+        
+        conn.commit()
+        
+        if cursor.rowcount == 0:
+            return jsonify({'error': 'Author not found in favorites'}), 404
+            
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"Error updating favorite author: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route('/authors')
+def browse_authors():
+    """View all authors with their image counts."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Get all authors with their image counts
+    cursor.execute("""
+        SELECT author as name, COUNT(*) as count 
+        FROM images 
+        GROUP BY author 
+        ORDER BY count DESC
+    """)
+    authors = cursor.fetchall()
+    
+    conn.close()
+    
+    return render_template('browse_authors.html', authors=authors)
 
 def create_app():
     """Create and configure the Flask application."""

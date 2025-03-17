@@ -106,6 +106,9 @@
                         <a class="nav-link" href="/images">Browse Images</a>
                     </li>
                     <li class="nav-item">
+                        <a class="nav-link" href="/authors">Browse Authors</a>
+                    </li>
+                    <li class="nav-item">
                         <a class="nav-link" href="/marked">Marked Images</a>
                     </li>
                 </ul>
@@ -220,6 +223,55 @@
                 console.error('Error:', error);
                 alert('Failed to delete note. Please try again.');
             });
+        }
+
+        // Favorite authors management
+        async function toggleFavoriteAuthor(authorName, starElement) {
+            try {
+                const response = await fetch('/api/favorite_authors', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        author_name: authorName,
+                        priority: 0  // Default priority
+                    })
+                });
+                
+                if (response.ok) {
+                    const icon = starElement.querySelector('i');
+                    if (icon.classList.contains('far')) {
+                        icon.classList.remove('far');
+                        icon.classList.add('fas');
+                        icon.style.color = '#ffc107';
+                    } else {
+                        icon.classList.remove('fas');
+                        icon.classList.add('far');
+                        icon.style.color = '#6c757d';
+                    }
+                } else {
+                    const data = await response.json();
+                    alert(data.error || 'Failed to update favorite status');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Failed to update favorite status');
+            }
+        }
+
+        async function checkFavoriteStatus(authorName) {
+            try {
+                const response = await fetch('/api/favorite_authors');
+                if (response.ok) {
+                    const data = await response.json();
+                    return data.authors.some(author => author.author_name === authorName);
+                }
+                return false;
+            } catch (error) {
+                console.error('Error:', error);
+                return false;
+            }
         }
     </script>
     {% block scripts %}{% endblock %}

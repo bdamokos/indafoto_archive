@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block title %}Browse Authors - Indafoto Archive Explorer{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h1>Browse Authors</h1>
+    
+    <div class="card">
+        <div class="card-body">
+            <div class="row">
+                {% for author in authors %}
+                <div class="col-md-4 mb-3">
+                    <div class="d-flex justify-content-between align-items-center p-2 bg-light rounded">
+                        <a href="{{ url_for('author_gallery', author_name=author.name) }}" class="text-decoration-none">
+                            {{ author.name }}
+                            <small class="text-muted">({{ author.count }} images)</small>
+                        </a>
+                        <button onclick="toggleFavoriteAuthor('{{ author.name }}', this)" 
+                                class="favorite-star btn btn-link p-0"
+                                data-author="{{ author.name }}">
+                            <i class="far fa-star"></i>
+                        </button>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Initialize favorite stars
+    document.addEventListener('DOMContentLoaded', async function() {
+        const stars = document.querySelectorAll('.favorite-star');
+        for (const star of stars) {
+            const authorName = star.dataset.author;
+            const isFavorite = await checkFavoriteStatus(authorName);
+            const icon = star.querySelector('i');
+            if (isFavorite) {
+                icon.classList.remove('far');
+                icon.classList.add('fas');
+                icon.style.color = '#ffc107';
+            } else {
+                icon.classList.remove('fas');
+                icon.classList.add('far');
+                icon.style.color = '#6c757d';
+            }
+        }
+    });
+</script>
+{% endblock %} 
