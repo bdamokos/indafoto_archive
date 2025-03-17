@@ -77,7 +77,7 @@ If you don't have Python installed:
    ```
    (Replace "path/to/indafoto_archive" with the actual path to where you extracted the files)
 
-3. Create and activate a virtual environment (recommended):
+3. Create and activate a virtual environment (recommended - skip if it is not working):
    ```
    # On Windows:
    python -m venv venv

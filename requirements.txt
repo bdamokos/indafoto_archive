@@ -3,3 +3,4 @@ tqdm
 beautifulsoup4
 flask
 Pillow
+portalocker
