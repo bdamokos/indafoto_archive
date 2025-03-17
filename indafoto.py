@@ -14,7 +14,7 @@ import argparse
 import hashlib
 import shutil
 from pathlib import Path
-import fcntl  # For file locking
+import portalocker  # Replace fcntl with portalocker
 import json
 
 # Configure logging
@@ -661,12 +661,12 @@ def download_image(image_url, author):
         lock_filename = filename + '.lock'
         
         try:
-            # Open the lock file with exclusive access
+            # Create the lock file
             with open(lock_filename, 'w') as lock_file:
                 try:
-                    # Get an exclusive lock
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except IOError:
+                    # Get an exclusive lock using portalocker
+                    portalocker.lock(lock_file, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                except portalocker.LockException:
                     # Another thread is downloading this file
                     logger.warning(f"Another thread is downloading {filename}, skipping")
                     return None, None
