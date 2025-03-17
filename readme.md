@@ -77,23 +77,76 @@ If you don't have Python installed:
    ```
    (Replace "path/to/indafoto_archive" with the actual path to where you extracted the files)
 
-3. Create and activate a virtual environment (recommended - skip if it is not working):
-   ```
-   # On Windows:
-   python -m venv venv
-   venv\Scripts\activate
+3. You have two options for installing the required packages:
 
-   # On macOS/Linux:
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
-
-   Note: If you see `(venv)` at the start of your command prompt, the virtual environment is activated correctly.
-
-4. Install the required packages:
+   **Option A - Simple Install (System-wide):**
    ```
    pip install -r requirements.txt
+   
+   # If that doesn't work, try:
+   python -m pip install -r requirements.txt
+   # OR on Windows:
+   py -m pip install -r requirements.txt
    ```
+
+   **Option B - Using Virtual Environment (Recommended Best Practice):**
+   
+   Virtual environments are a best practice for Python development. They create an isolated space for project dependencies, but they're optional - the script will work fine with a system-wide installation too.
+
+   **For Windows:**
+   ```
+   # Create and activate virtual environment
+   python -m venv .venv
+   .venv\Scripts\activate
+   
+   # Install packages
+   pip install -r requirements.txt
+   ```
+
+   **For macOS/Linux:**
+   ```
+   # Create and activate virtual environment
+   python3 -m venv venv
+   source venv/bin/activate
+   
+   # Install packages
+   pip install -r requirements.txt
+   ```
+
+   Note: If you see `(.venv)` at the start of your command prompt, the virtual environment is activated correctly.
+
+<details>
+<summary>Click to expand: Virtual Environment Troubleshooting</summary>
+
+**Windows Troubleshooting:**
+- If `python -m venv .venv` fails, try:
+  ```
+  py -m venv .venv
+  ```
+
+- For activation, try these commands until one works:
+  ```
+  .venv\Scripts\activate.bat
+  # OR
+  .venv\Scripts\activate
+  # OR if using PowerShell:
+  .venv\Scripts\Activate.ps1
+  ```
+
+- If you get a "not digitally signed" error in PowerShell, run:
+  ```
+  Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+  ```
+
+- If python/py commands aren't found, ensure Python is added to PATH:
+  1. Search for "Environment Variables" in Windows
+  2. Click "Environment Variables" under System Properties
+  3. Under "System Variables", find and select "Path"
+  4. Click "Edit" and check if Python paths are listed
+  5. If not, add Python installation directory (typically `C:\Users\YourUsername\AppData\Local\Programs\Python\Python3x` and `C:\Users\YourUsername\AppData\Local\Programs\Python\Python3x\Scripts`)
+
+**Note:** If you're having trouble with virtual environments, you can skip this step and use Option A (Simple Install) instead. The script will work fine either way.
+</details>
 
 ### Running the Tools
 
@@ -102,22 +155,17 @@ If you don't have Python installed:
 The archive submitter should be run as a separate process from the crawler:
 
 ```bash
-# Start the archive submitter in one terminal:
-python archive_submitter.py
-
-# Start the crawler in another terminal:
-python indafoto.py
+python archive_submitter.py  # Start in one terminal
+python indafoto.py          # Start in another terminal
 ```
-
 
 #### Crawler Usage
 
-1. Make sure your virtual environment is activated (you should see `(venv)` in your command prompt)
-   If not, activate it:
+1. If you used a virtual environment, make sure it's activated:
    ```
    # On Windows:
-   venv\Scripts\activate
-
+   .venv\Scripts\activate
+   
    # On macOS/Linux:
    source venv/bin/activate
    ```
