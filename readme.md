@@ -188,6 +188,44 @@ python indafoto.py          # Start in another terminal
    python indafoto.py --start-offset 100 --workers 4
    ```
 
+#### Worker Optimization
+
+Before starting the crawler, you can optimize the number of parallel download workers for your system:
+
+```bash
+python optimize_workers.py
+```
+
+This will:
+1. Test different worker counts to find the optimal configuration
+2. Download actual images to measure real performance
+3. Save the results to `worker_optimization.json`
+4. Recommend the best worker count for your system
+
+Available arguments:
+```
+python optimize_workers.py --min-workers N    # Minimum workers to test (default: 1)
+python optimize_workers.py --max-workers N    # Maximum workers to test (default: 16)
+python optimize_workers.py --initial-workers N # Initial worker count (default: 4)
+```
+
+Example:
+```bash
+python optimize_workers.py --min-workers 4 --max-workers 12 --initial-workers 6
+```
+
+The script will:
+- Test worker counts from 4 to 12
+- Start with 6 workers
+- Test each configuration with a full page of downloads
+- Find the optimal balance between speed and reliability
+- Save results for future reference
+
+After optimization, you can run the crawler with the recommended worker count:
+```bash
+python indafoto.py --workers N  # Where N is the recommended worker count
+```
+
 #### Archive Explorer Usage
 ![Archive Explorer Interface](docs/archive_explorer.png)
 
