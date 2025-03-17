@@ -1067,7 +1067,16 @@ def browse_albums():
     conn = get_db()
     cursor = conn.cursor()
     
-    # Get all albums with their image counts and first image
+    # Get current page from query parameters
+    page = request.args.get('page', 1, type=int)
+    items_per_page = ITEMS_PER_PAGE
+    
+    # Get total count of albums
+    cursor.execute("SELECT COUNT(*) FROM albums")
+    total_items = cursor.fetchone()[0]
+    total_pages = math.ceil(total_items / items_per_page)
+    
+    # Get paginated albums with their image counts and first image
     cursor.execute("""
         WITH album_stats AS (
             SELECT a.id, a.title, a.url, a.is_public,
@@ -1089,13 +1098,14 @@ def browse_albums():
         LEFT JOIN marked_images m ON i.id = m.image_id
         LEFT JOIN image_notes n ON i.id = n.image_id
         ORDER BY as1.image_count DESC, as1.title
-    """)
+        LIMIT ? OFFSET ?
+    """, (items_per_page, (page - 1) * items_per_page))
     
     albums = cursor.fetchall()
     
     # Get some statistics
     stats = {
-        'total_albums': len(albums),
+        'total_albums': total_items,
         'total_public': sum(1 for album in albums if album['is_public']),
         'total_private': sum(1 for album in albums if not album['is_public']),
         'total_images': sum(album['image_count'] for album in albums)
@@ -1105,7 +1115,9 @@ def browse_albums():
     
     return render_template('browse_albums.html',
                          albums=albums,
-                         stats=stats)
+                         stats=stats,
+                         page=page,
+                         total_pages=total_pages)
 
 @app.route('/collections')
 def browse_collections():
@@ -1113,7 +1125,16 @@ def browse_collections():
     conn = get_db()
     cursor = conn.cursor()
     
-    # Get all collections with their image counts and first image
+    # Get current page from query parameters
+    page = request.args.get('page', 1, type=int)
+    items_per_page = ITEMS_PER_PAGE
+    
+    # Get total count of collections
+    cursor.execute("SELECT COUNT(*) FROM collections")
+    total_items = cursor.fetchone()[0]
+    total_pages = math.ceil(total_items / items_per_page)
+    
+    # Get paginated collections with their image counts and first image
     cursor.execute("""
         WITH collection_stats AS (
             SELECT c.id, c.title, c.url, c.is_public,
@@ -1135,13 +1156,14 @@ def browse_collections():
         LEFT JOIN marked_images m ON i.id = m.image_id
         LEFT JOIN image_notes n ON i.id = n.image_id
         ORDER BY cs.image_count DESC, cs.title
-    """)
+        LIMIT ? OFFSET ?
+    """, (items_per_page, (page - 1) * items_per_page))
     
     collections = cursor.fetchall()
     
     # Get some statistics
     stats = {
-        'total_collections': len(collections),
+        'total_collections': total_items,
         'total_public': sum(1 for collection in collections if collection['is_public']),
         'total_private': sum(1 for collection in collections if not collection['is_public']),
         'total_images': sum(collection['image_count'] for collection in collections)
@@ -1151,7 +1173,9 @@ def browse_collections():
     
     return render_template('browse_collections.html',
                          collections=collections,
-                         stats=stats)
+                         stats=stats,
+                         page=page,
+                         total_pages=total_pages)
 
 def create_app():
     """Create and configure the Flask application."""
