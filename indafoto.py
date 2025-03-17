@@ -38,7 +38,22 @@ BASE_RATE_LIMIT = 1  # Base seconds between requests
 BASE_TIMEOUT = 60    # Base timeout in seconds
 FILES_PER_DIR = 1000  # Maximum number of files per directory
 ARCHIVE_SAMPLE_RATE = 0.005  # 0.5% sample rate for Internet Archive submissions
-NUM_WORKERS = 8  # Number of parallel download workers
+DEFAULT_WORKERS = 8  # Default number of parallel download workers
+
+# Adaptive rate limiting and worker scaling configuration
+MIN_WORKERS = 1  # Minimum number of workers
+INITIAL_WAIT_TIME = 300  # 5 minutes in seconds
+MAX_WAIT_TIME = 3600  # 1 hour in seconds
+FAILURE_THRESHOLD = 5  # Number of consecutive failures before reducing workers
+SUCCESS_THRESHOLD = 3  # Number of consecutive successes before increasing workers
+WORKER_SCALE_STEP = 2  # How many workers to add when scaling up
+
+# Failure tracking
+consecutive_failures = 0
+consecutive_successes = 0
+current_wait_time = 0
+current_workers = DEFAULT_WORKERS  # Will be updated by command line argument
+MAX_WORKERS = DEFAULT_WORKERS  # Will be updated by command line argument
 
 HEADERS = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -1074,14 +1089,16 @@ def retry_failed_pages(conn, cursor):
 
 def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
     """Process a list of images using a pipeline pattern for metadata extraction and downloading."""
+    global consecutive_failures, consecutive_successes, current_wait_time, current_workers
+    
     author_image_counts = {}
     processed_count = 0
     failed_count = 0
     skipped_count = 0
     
     # Initialize queues
-    metadata_queue = queue.Queue(maxsize=NUM_WORKERS * 2)  # Buffer for pending metadata extractions
-    download_queue = queue.Queue(maxsize=NUM_WORKERS)      # Buffer for pending downloads
+    metadata_queue = queue.Queue(maxsize=current_workers * 2)  # Buffer for pending metadata extractions
+    download_queue = queue.Queue(maxsize=current_workers)      # Buffer for pending downloads
     results_queue = queue.Queue()                         # Buffer for completed downloads
     error_queue = queue.Queue()                          # Buffer for errors
     
@@ -1185,7 +1202,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
         
         # Start metadata workers
         metadata_threads = []
-        for _ in range(NUM_WORKERS):
+        for _ in range(current_workers):
             t = threading.Thread(target=metadata_worker)
             t.daemon = True
             t.start()
@@ -1193,7 +1210,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
         
         # Start download workers
         download_threads = []
-        for _ in range(NUM_WORKERS):
+        for _ in range(current_workers):
             t = threading.Thread(target=download_worker)
             t.daemon = True
             t.start()
@@ -1204,14 +1221,14 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
             metadata_queue.put(image_data)
         
         # Add poison pills for metadata workers
-        for _ in range(NUM_WORKERS):
+        for _ in range(current_workers):
             metadata_queue.put(None)
         
         # Wait for metadata queue to be processed
         metadata_queue.join()
         
         # Add poison pills for download workers
-        for _ in range(NUM_WORKERS):
+        for _ in range(current_workers):
             download_queue.put(None)
         
         # Wait for download queue to be processed
@@ -1333,16 +1350,53 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
             logger.error(f"{error_type.capitalize()} error for {url}: {error_msg}")
             failed_count += 1
         
-        # Return success if we processed all images (including skipped ones)
+        # Update failure/success tracking and adjust workers
         total_images = len(image_data_list)
         success = (processed_count + failed_count) == total_images and failed_count == 0
+        
+        if success:
+            consecutive_successes += 1
+            consecutive_failures = 0
+            current_wait_time = 0
+            
+            # Scale up workers if we've had enough consecutive successes
+            if consecutive_successes >= SUCCESS_THRESHOLD:
+                if current_workers < MAX_WORKERS:
+                    new_workers = min(current_workers + WORKER_SCALE_STEP, MAX_WORKERS)
+                    logger.info(f"Scaling up workers from {current_workers} to {new_workers} due to {consecutive_successes} consecutive successes")
+                    current_workers = new_workers
+                    consecutive_successes = 0  # Reset counter after scaling up
+        else:
+            consecutive_failures += 1
+            consecutive_successes = 0
+            
+            # Scale down workers if we've had enough consecutive failures
+            if consecutive_failures >= FAILURE_THRESHOLD:
+                if current_workers > MIN_WORKERS:
+                    new_workers = max(current_workers - WORKER_SCALE_STEP, MIN_WORKERS)
+                    logger.info(f"Scaling down workers from {current_workers} to {new_workers} due to {consecutive_failures} consecutive failures")
+                    current_workers = new_workers
+                    
+                    # Calculate exponential backoff wait time
+                    if current_wait_time == 0:
+                        current_wait_time = INITIAL_WAIT_TIME
+                    else:
+                        current_wait_time = min(current_wait_time * 2, MAX_WAIT_TIME)
+                    
+                    logger.info(f"Waiting {current_wait_time} seconds before continuing...")
+                    time.sleep(current_wait_time)
+                    consecutive_failures = 0  # Reset counter after waiting
         
         stats = {
             'processed_count': processed_count,
             'failed_count': failed_count,
             'skipped_count': skipped_count,
             'total_images': total_images,
-            'author_counts': author_image_counts
+            'author_counts': author_image_counts,
+            'current_workers': current_workers,
+            'consecutive_successes': consecutive_successes,
+            'consecutive_failures': consecutive_failures,
+            'current_wait_time': current_wait_time
         }
         
         return success, stats
@@ -1387,6 +1441,8 @@ def estimate_space_requirements(downloaded_bytes, pages_processed, total_pages):
 
 def crawl_images(start_offset=0, retry_mode=False):
     """Main function to crawl images and save metadata."""
+    global current_workers, consecutive_failures, consecutive_successes, current_wait_time
+    
     conn = init_db()
     cursor = conn.cursor()
     
@@ -1449,7 +1505,8 @@ def crawl_images(start_offset=0, retry_mode=False):
                     logger.info(f"Successfully completed page {page} - "
                               f"Processed: {stats['processed_count']}, "
                               f"Failed: {stats['failed_count']}, "
-                              f"Total: {stats['total_images']}")
+                              f"Total: {stats['total_images']}, "
+                              f"Workers: {stats['current_workers']}")
                 else:
                     # If processing wasn't completely successful, add to failed_pages
                     error_msg = stats.get('error', 'Unknown error')
@@ -1462,7 +1519,8 @@ def crawl_images(start_offset=0, retry_mode=False):
                     logger.warning(f"Failed to process all images on page {page} - "
                                  f"Processed: {stats['processed_count']}, "
                                  f"Failed: {stats['failed_count']}, "
-                                 f"Total: {stats['total_images']}")
+                                 f"Total: {stats['total_images']}, "
+                                 f"Workers: {stats['current_workers']}")
                 
                 # Estimate space requirements
                 if pages_processed % 10 == 0:  # Check every 10 pages
@@ -1472,7 +1530,11 @@ def crawl_images(start_offset=0, retry_mode=False):
                         f"  Average per page: {estimates['avg_mb_per_page']:.2f}MB\n"
                         f"  Estimated remaining: {estimates['estimated_remaining_gb']:.2f}GB\n"
                         f"  Total estimated: {estimates['total_estimated_gb']:.2f}GB\n"
-                        f"  Current free space: {free_space_gb:.2f}GB"
+                        f"  Current free space: {free_space_gb:.2f}GB\n"
+                        f"  Current workers: {current_workers}\n"
+                        f"  Consecutive successes: {consecutive_successes}\n"
+                        f"  Consecutive failures: {consecutive_failures}\n"
+                        f"  Current wait time: {current_wait_time}s"
                     )
                     
                     # Warn if estimated space requirement exceeds 80% of available space
@@ -1483,7 +1545,11 @@ def crawl_images(start_offset=0, retry_mode=False):
                             f"is more than 80% of available space ({free_space_gb:.2f}GB)"
                         )
                 
-                time.sleep(BASE_RATE_LIMIT)
+                # Adaptive rate limiting based on current wait time
+                if current_wait_time > 0:
+                    time.sleep(current_wait_time)
+                else:
+                    time.sleep(BASE_RATE_LIMIT)
 
             except RuntimeError as e:
                 logger.critical(str(e))
@@ -1514,6 +1580,10 @@ def crawl_images(start_offset=0, retry_mode=False):
         logger.info(f"Total pages completed: {completed_count}")
         logger.info(f"Pages pending retry: {pending_count}")
         logger.info(f"Total pages processed this run: {pages_processed}")
+        logger.info(f"Final worker count: {current_workers}")
+        logger.info(f"Final consecutive successes: {consecutive_successes}")
+        logger.info(f"Final consecutive failures: {consecutive_failures}")
+        logger.info(f"Final wait time: {current_wait_time}s")
         
         conn.close()
         logger.info("Crawler finished, database connection closed")
@@ -1803,13 +1873,15 @@ if __name__ == "__main__":
                        help='Run camera make/model extraction test')
     parser.add_argument('--redownload-author',
                        help='Redownload all images from a specific author')
-    parser.add_argument('--workers', type=int, default=8,
-                       help='Number of parallel download workers (default: 8)')
+    parser.add_argument('--workers', type=int, default=DEFAULT_WORKERS,
+                       help=f'Number of parallel download workers (default: {DEFAULT_WORKERS})')
     args = parser.parse_args()
     
     try:
         # Set the number of workers from command line argument
-        NUM_WORKERS = args.workers
+        current_workers = args.workers
+        MAX_WORKERS = args.workers
+        logger.info(f"Starting crawler with {current_workers} workers")
         
         if args.redownload_author:
             redownload_author_images(args.redownload_author)
