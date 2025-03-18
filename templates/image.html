@@ -134,6 +134,9 @@
 <div class="image-metadata">
     <h2>Image Details</h2>
     <p><strong>Title:</strong> {{ image.title }}</p>
+    {% if image.description %}
+    <p><strong>Description:</strong> {{ image.description }}</p>
+    {% endif %}
     <p><strong>Author:</strong> <a href="{{ url_for('author_gallery', author_name=image.author) }}">{{ image.author }}</a></p>
     <p><strong>License:</strong> {{ image.license }}</p>
     {% if image.camera_make or image.camera_model %}

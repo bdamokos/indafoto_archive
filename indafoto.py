@@ -92,6 +92,7 @@ def init_db():
         local_path TEXT,
         sha256_hash TEXT,
         title TEXT,
+        description TEXT,
         author TEXT,
         author_url TEXT,
         license TEXT,
@@ -110,6 +111,12 @@ def init_db():
     cursor.execute("""
     CREATE INDEX IF NOT EXISTS idx_images_url ON images(url)
     """)
+    
+    # Add description column if it doesn't exist (for backwards compatibility)
+    try:
+        cursor.execute("ALTER TABLE images ADD COLUMN description TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     
     # Add camera_model column if it doesn't exist (for backwards compatibility)
     try:
@@ -390,12 +397,18 @@ def extract_metadata(photo_page_url, attempt=1):
         soup = BeautifulSoup(response.text, "html.parser")
         
         # Extract title from h1 tag
-        title = soup.find("h1")
+        title = soup.find("h1", class_="image_title")
         if title:
             title = title.text.strip()
         else:
             title_meta = soup.find("meta", property="og:title")
             title = title_meta["content"] if title_meta else "Unknown"
+
+        # Extract description from desc div
+        description = None
+        desc_div = soup.find("div", class_="desc")
+        if desc_div:
+            description = desc_div.text.strip()
 
         # Extract author from user_name class
         author_container = soup.find("h2", class_="user_name")
@@ -616,6 +629,7 @@ def extract_metadata(photo_page_url, attempt=1):
 
         metadata = {
             'title': title,
+            'description': description,
             'author': author,
             'author_url': author_url,
             'license': license_info,
@@ -1258,16 +1272,17 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
             try:
                 # Insert image data
                 cursor.execute("""
-                    INSERT INTO images (url, local_path, sha256_hash, title, author, 
+                    INSERT INTO images (url, local_path, sha256_hash, title, description, author, 
                                      author_url, license, camera_make, camera_model, 
                                      focal_length, aperture, shutter_speed, taken_date, 
                                      upload_date, page_url)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     url,
                     local_path,
                     file_hash,
                     metadata.get('title'),
+                    metadata.get('description'),
                     metadata.get('author'),
                     metadata.get('author_url'),
                     metadata.get('license'),

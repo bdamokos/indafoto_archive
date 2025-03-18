@@ -42,6 +42,9 @@
                 </button>
                 <div class="image-overlay">
                     <h6 class="card-title text-truncate">{{ image.title }}</h6>
+                    {% if image.description %}
+                    <p class="card-text small mb-2 text-truncate">{{ image.description }}</p>
+                    {% endif %}
                     <p class="card-text small mb-0">
                         by <a href="{{ url_for('browse_images', author=image.author) }}" class="text-white">{{ image.author }}</a>
                     </p>

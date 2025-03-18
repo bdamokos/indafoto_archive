@@ -63,6 +63,9 @@
                 </a>
                 <div class="card-body">
                     <h6 class="card-title text-truncate">{{ image.title }}</h6>
+                    {% if image.description %}
+                    <p class="card-text small mb-2 text-truncate">{{ image.description }}</p>
+                    {% endif %}
                     <p class="card-text small mb-2">
                         by <a href="{{ url_for('browse_images', author=image.author) }}">{{ image.author }}</a>
                     </p>
