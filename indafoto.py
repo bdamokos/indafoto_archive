@@ -294,11 +294,12 @@ def get_image_links(search_page_url, attempt=1):
         logger.info(f"Response status code: {response.status_code}")
         logger.info(f"Response URL after redirects: {response.url}")
         
-        # Special handling for 503 Service Unavailable
-        if response.status_code == 503:
-            logger.error(f"Service Unavailable (503) for {search_page_url}")
-            # Raise a specific exception for 503 errors
-            raise requests.exceptions.HTTPError("Service Unavailable (503)")
+        # Special handling for 50x errors
+        if response.status_code in [503, 504, 500, 502, 507, 508, 509]:
+            error_msg = f"Server Error ({response.status_code}) for {search_page_url}"
+            logger.error(error_msg)
+            # Raise a specific exception for 50x errors
+            raise requests.exceptions.HTTPError(f"Server Error ({response.status_code})")
         
         response.raise_for_status()
         
@@ -340,8 +341,8 @@ def get_image_links(search_page_url, attempt=1):
         logger.info(f"Found {len(image_data)} images with metadata on page {search_page_url}")
         return image_data
     except requests.exceptions.HTTPError as e:
-        if "503" in str(e):
-            # Re-raise the HTTPError for 503 errors to be handled by the caller
+        if any(str(code) in str(e) for code in [503, 504, 500, 502, 507, 508, 509]):
+            # Re-raise the HTTPError for 50x errors to be handled by the caller
             raise
         logger.error(f"HTTP error for {search_page_url}: {e}")
         return []
@@ -1535,16 +1536,17 @@ def crawl_images(start_offset=0, retry_mode=False):
                 try:
                     image_data_list = get_image_links(search_page_url, attempt=1)
                 except requests.exceptions.HTTPError as e:
-                    if "503" in str(e):
-                        # Handle 503 Service Unavailable error
-                        logger.error(f"Service Unavailable (503) for page {page}, implementing 5-minute cooldown")
+                    if any(str(code) in str(e) for code in [503, 504, 500, 502, 507, 508, 509]):
+                        # Handle 50x Server Error with 5-minute cooldown
+                        error_code = re.search(r'\((\d+)\)', str(e)).group(1)
+                        logger.error(f"Server Error ({error_code}) for page {page}, implementing 5-minute cooldown")
                         
                         # Add to failed_pages with special status
                         cursor.execute("""
                             INSERT OR REPLACE INTO failed_pages (
                                 page_number, url, error, last_attempt, status, attempts
-                            ) VALUES (?, ?, ?, ?, 'service_unavailable', 0)
-                        """, (page, search_page_url, "Service Unavailable (503)", datetime.now().isoformat()))
+                            ) VALUES (?, ?, ?, ?, 'server_error', 0)
+                        """, (page, search_page_url, f"Server Error ({error_code})", datetime.now().isoformat()))
                         conn.commit()
                         
                         # Implement 5-minute cooldown
