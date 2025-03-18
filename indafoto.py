@@ -294,6 +294,12 @@ def get_image_links(search_page_url, attempt=1):
         logger.info(f"Response status code: {response.status_code}")
         logger.info(f"Response URL after redirects: {response.url}")
         
+        # Special handling for 503 Service Unavailable
+        if response.status_code == 503:
+            logger.error(f"Service Unavailable (503) for {search_page_url}")
+            # Raise a specific exception for 503 errors
+            raise requests.exceptions.HTTPError("Service Unavailable (503)")
+        
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, "html.parser")
@@ -333,6 +339,12 @@ def get_image_links(search_page_url, attempt=1):
 
         logger.info(f"Found {len(image_data)} images with metadata on page {search_page_url}")
         return image_data
+    except requests.exceptions.HTTPError as e:
+        if "503" in str(e):
+            # Re-raise the HTTPError for 503 errors to be handled by the caller
+            raise
+        logger.error(f"HTTP error for {search_page_url}: {e}")
+        return []
     except requests.RequestException as e:
         logger.error(f"Failed to fetch {search_page_url}: {e}")
         return []
@@ -1470,13 +1482,45 @@ def crawl_images(start_offset=0, retry_mode=False):
     pages_processed = 0
     
     try:
+        # If in retry mode, first check for pages with 0 images in completed_pages
+        if retry_mode:
+            cursor.execute("""
+                SELECT page_number, completion_date 
+                FROM completed_pages 
+                WHERE image_count = 0 
+                ORDER BY page_number
+            """)
+            zero_image_pages = cursor.fetchall()
+            
+            if zero_image_pages:
+                logger.info(f"Found {len(zero_image_pages)} pages with 0 images to retry")
+                for page_number, completion_date in zero_image_pages:
+                    search_page_url = SEARCH_URL_TEMPLATE.format(page_number)
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO failed_pages (
+                            page_number, url, error, last_attempt, status, attempts
+                        ) VALUES (?, ?, ?, ?, 'zero_images', 0)
+                    """, (page_number, search_page_url, "Page had 0 images", datetime.now().isoformat()))
+                    conn.commit()
+                    logger.info(f"Added page {page_number} to retry queue due to 0 images")
+        
         for page in tqdm(range(start_offset, TOTAL_PAGES), desc="Crawling pages", colour='blue'):
             try:
                 # Check if page was already completed successfully
-                cursor.execute("SELECT completion_date FROM completed_pages WHERE page_number = ?", (page,))
-                if cursor.fetchone():
-                    logger.info(f"Skipping page {page} - already completed successfully")
-                    continue
+                cursor.execute("""
+                    SELECT completion_date, image_count 
+                    FROM completed_pages 
+                    WHERE page_number = ?
+                """, (page,))
+                result = cursor.fetchone()
+                
+                if result:
+                    completion_date, image_count = result
+                    if image_count > 0:
+                        logger.info(f"Skipping page {page} - already completed successfully with {image_count} images")
+                        continue
+                    else:
+                        logger.info(f"Retrying page {page} - completed but had 0 images")
                 
                 # Check disk space before each page
                 free_space_gb = get_free_space_gb(BASE_DIR)
@@ -1488,7 +1532,36 @@ def crawl_images(start_offset=0, retry_mode=False):
                 # Track page size before downloading
                 page_size_before = sum(f.stat().st_size for f in Path(BASE_DIR).rglob('*') if f.is_file())
                 
-                image_data_list = get_image_links(search_page_url, attempt=1)
+                try:
+                    image_data_list = get_image_links(search_page_url, attempt=1)
+                except requests.exceptions.HTTPError as e:
+                    if "503" in str(e):
+                        # Handle 503 Service Unavailable error
+                        logger.error(f"Service Unavailable (503) for page {page}, implementing 5-minute cooldown")
+                        
+                        # Add to failed_pages with special status
+                        cursor.execute("""
+                            INSERT OR REPLACE INTO failed_pages (
+                                page_number, url, error, last_attempt, status, attempts
+                            ) VALUES (?, ?, ?, ?, 'service_unavailable', 0)
+                        """, (page, search_page_url, "Service Unavailable (503)", datetime.now().isoformat()))
+                        conn.commit()
+                        
+                        # Implement 5-minute cooldown
+                        cooldown_minutes = 5
+                        logger.info(f"Waiting {cooldown_minutes} minutes before continuing...")
+                        time.sleep(cooldown_minutes * 60)
+                        continue
+                    else:
+                        # Handle other HTTP errors
+                        logger.error(f"HTTP error for page {page}: {e}")
+                        cursor.execute("""
+                            INSERT OR REPLACE INTO failed_pages (
+                                page_number, url, error, last_attempt, status, attempts
+                            ) VALUES (?, ?, ?, ?, 'error', 0)
+                        """, (page, search_page_url, str(e), datetime.now().isoformat()))
+                        conn.commit()
+                        continue
                 
                 # Process the image list
                 success, stats = process_image_list(image_data_list, conn, cursor)
@@ -1497,26 +1570,27 @@ def crawl_images(start_offset=0, retry_mode=False):
                 page_size_after = sum(f.stat().st_size for f in Path(BASE_DIR).rglob('*') if f.is_file())
                 page_downloaded_bytes = page_size_after - page_size_before
                 total_downloaded_bytes += page_downloaded_bytes
-                pages_processed += 1
                 
                 if success:
-                    # Record successful completion
+                    # Mark page as completed with image count
                     cursor.execute("""
-                        INSERT INTO completed_pages (
+                        INSERT OR REPLACE INTO completed_pages (
                             page_number, completion_date, image_count, total_size_bytes
                         ) VALUES (?, ?, ?, ?)
-                    """, (
-                        page,
-                        datetime.now().isoformat(),
-                        stats['total_images'],
-                        page_downloaded_bytes
-                    ))
+                    """, (page, datetime.now().isoformat(), stats['processed_count'], page_downloaded_bytes))
                     conn.commit()
                     
-                    # Remove from failed_pages if it was there
-                    cursor.execute("DELETE FROM failed_pages WHERE page_number = ?", (page,))
-                    conn.commit()
+                    # Update author stats
+                    for author, count in stats['author_counts'].items():
+                        cursor.execute("""
+                            UPDATE author_stats 
+                            SET total_images = total_images + ?,
+                                last_updated = ?
+                            WHERE author = ?
+                        """, (count, datetime.now().isoformat(), author))
+                        conn.commit()
                     
+                    pages_processed += 1
                     logger.info(f"Successfully completed page {page} - "
                               f"Processed: {stats['processed_count']}, "
                               f"Failed: {stats['failed_count']}, "
@@ -1527,8 +1601,8 @@ def crawl_images(start_offset=0, retry_mode=False):
                     error_msg = stats.get('error', 'Unknown error')
                     cursor.execute("""
                         INSERT OR REPLACE INTO failed_pages (
-                            page_number, url, error, last_attempt, status
-                        ) VALUES (?, ?, ?, ?, 'pending')
+                            page_number, url, error, last_attempt, status, attempts
+                        ) VALUES (?, ?, ?, ?, 'pending', 0)
                     """, (page, search_page_url, error_msg, datetime.now().isoformat()))
                     conn.commit()
                     logger.warning(f"Failed to process all images on page {page} - "
@@ -1537,71 +1611,30 @@ def crawl_images(start_offset=0, retry_mode=False):
                                  f"Total: {stats['total_images']}, "
                                  f"Workers: {stats['current_workers']}")
                 
-                # Estimate space requirements
-                if pages_processed % 10 == 0:  # Check every 10 pages
-                    estimates = estimate_space_requirements(total_downloaded_bytes, pages_processed, TOTAL_PAGES)
-                    logger.info(
-                        f"Space usage estimates:\n"
-                        f"  Average per page: {estimates['avg_mb_per_page']:.2f}MB\n"
-                        f"  Estimated remaining: {estimates['estimated_remaining_gb']:.2f}GB\n"
-                        f"  Total estimated: {estimates['total_estimated_gb']:.2f}GB\n"
-                        f"  Current free space: {free_space_gb:.2f}GB\n"
-                        f"  Current workers: {current_workers}\n"
-                        f"  Consecutive successes: {consecutive_successes}\n"
-                        f"  Consecutive failures: {consecutive_failures}\n"
-                        f"  Current wait time: {current_wait_time}s"
-                    )
-                    
-                    # Warn if estimated space requirement exceeds 80% of available space
-                    if estimates['estimated_remaining_gb'] > free_space_gb * 0.8:
-                        logger.warning(
-                            f"Warning: Estimated remaining space requirement "
-                            f"({estimates['estimated_remaining_gb']:.2f}GB) "
-                            f"is more than 80% of available space ({free_space_gb:.2f}GB)"
-                        )
+                # Rate limiting between pages
+                time.sleep(BASE_RATE_LIMIT)
                 
-                # Adaptive rate limiting based on current wait time
-                if current_wait_time > 0:
-                    time.sleep(current_wait_time)
-                else:
-                    time.sleep(BASE_RATE_LIMIT)
-
-            except RuntimeError as e:
-                logger.critical(str(e))
-                break
             except Exception as e:
                 logger.error(f"Error processing page {page}: {e}")
-                # Record the failed page
+                # Add to failed_pages with error status
                 cursor.execute("""
                     INSERT OR REPLACE INTO failed_pages (
-                        page_number, url, error, last_attempt, status
-                    ) VALUES (?, ?, ?, ?, 'pending')
+                        page_number, url, error, last_attempt, status, attempts
+                    ) VALUES (?, ?, ?, ?, 'error', 0)
                 """, (page, search_page_url, str(e), datetime.now().isoformat()))
                 conn.commit()
                 continue
-
+    
     except KeyboardInterrupt:
-        logger.info("Crawler interrupted by user")
-    except Exception as e:
-        logger.critical(f"Unexpected error occurred: {e}", exc_info=True)
+        logger.info("\nCrawling interrupted by user")
     finally:
-        # Print summary of progress
-        cursor.execute("SELECT COUNT(*) FROM completed_pages")
-        completed_count = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM failed_pages WHERE status = 'pending'")
-        pending_count = cursor.fetchone()[0]
-        
+        # Print summary
         logger.info("\nCrawling Summary:")
-        logger.info(f"Total pages completed: {completed_count}")
-        logger.info(f"Pages pending retry: {pending_count}")
-        logger.info(f"Total pages processed this run: {pages_processed}")
+        logger.info(f"Pages processed: {pages_processed}")
+        logger.info(f"Total downloaded: {total_downloaded_bytes / (1024*1024*1024):.2f}GB")
         logger.info(f"Final worker count: {current_workers}")
-        logger.info(f"Final consecutive successes: {consecutive_successes}")
-        logger.info(f"Final consecutive failures: {consecutive_failures}")
-        logger.info(f"Final wait time: {current_wait_time}s")
         
         conn.close()
-        logger.info("Crawler finished, database connection closed")
 
 def test_album_extraction():
     """Test function to verify album and collection extraction from specific pages."""
