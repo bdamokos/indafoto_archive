@@ -47,6 +47,7 @@ class WorkerOptimizer:
         self.running = True
         self.test_queue = queue.Queue()
         self.results_queue = queue.Queue()
+        self.last_tested_page = self.get_next_test_page() - 1  # Initialize to last completed page
         
     def load_optimization_data(self):
         """Load previous optimization results if available."""
@@ -85,8 +86,8 @@ class WorkerOptimizer:
         """Test a specific number of workers and return performance metrics."""
         logger.info(f"Testing with {worker_count} workers...")
         
-        # Keep trying pages until we find one with new images
-        test_page = self.get_next_test_page()
+        # Start from the page after the last tested page
+        test_page = self.last_tested_page + 1
         
         while True:
             search_page_url = f"https://indafoto.hu/search/list?profile=main&sphinx=1&search=advanced&textsearch=fulltext&textuser=&textmap=&textcompilation=&photo=&datefrom=&dateto=&licence%5B1%5D=I1%3BI2%3BII1%3BII2&licence%5B2%5D=I1%3BI2%3BI3&page_offset={test_page}"
@@ -148,6 +149,29 @@ class WorkerOptimizer:
         total_downloads = stats['total_images'] - stats['skipped_count']
         success_rate = stats['processed_count'] / total_downloads if total_downloads > 0 else 0
         
+        # Calculate estimated completion time for different average image sizes
+        TOTAL_IMAGES = 15000 * 36  # 540,000 images
+        
+        estimated_completion = {}
+        for avg_size_mb in [1.0, 2.0]:
+            total_data_gb = (TOTAL_IMAGES * avg_size_mb) / 1024
+            
+            if speed_mbps > 0:
+                estimated_seconds = (TOTAL_IMAGES * avg_size_mb) / speed_mbps
+                estimated_hours = estimated_seconds / 3600
+                estimated_days = estimated_hours / 24
+            else:
+                estimated_seconds = float('inf')
+                estimated_hours = float('inf')
+                estimated_days = float('inf')
+            
+            estimated_completion[f"{avg_size_mb}MB"] = {
+                'seconds': estimated_seconds,
+                'hours': estimated_hours,
+                'days': estimated_days,
+                'total_data_gb': total_data_gb
+            }
+        
         metrics = {
             'worker_count': worker_count,
             'duration': duration,
@@ -159,8 +183,12 @@ class WorkerOptimizer:
             'skipped_count': stats['skipped_count'],
             'total_images': stats['total_images'],
             'total_downloads': total_downloads,
-            'test_page': test_page  # Add the page number to metrics
+            'test_page': test_page,
+            'estimated_completion': estimated_completion
         }
+        
+        # Update the last tested page
+        self.last_tested_page = test_page
         
         logger.info(f"Test results for {worker_count} workers (page {test_page}):")
         logger.info(f"  Speed: {speed_mbps:.2f} MB/s")
@@ -168,6 +196,12 @@ class WorkerOptimizer:
         logger.info(f"  Processed: {stats['processed_count']}")
         logger.info(f"  Failed: {stats['failed_count']}")
         logger.info(f"  Skipped: {stats['skipped_count']}")
+        if speed_mbps > 0:
+            logger.info("\nEstimated completion times:")
+            for avg_size, est in estimated_completion.items():
+                logger.info(f"  For {avg_size} average image size:")
+                logger.info(f"    Total data: {est['total_data_gb']:.1f} GB")
+                logger.info(f"    Time: {est['days']:.1f} days ({est['hours']:.1f} hours)")
         
         return metrics
     
@@ -175,48 +209,85 @@ class WorkerOptimizer:
         """Find the optimal number of workers through testing."""
         logger.info("Starting worker optimization...")
         
-        # Test different worker counts
-        worker_counts = list(range(self.min_workers, self.max_workers + 1, 2))  # Test odd numbers
-        worker_counts.extend(list(range(self.min_workers + 1, self.max_workers + 1, 2)))  # Test even numbers
-        worker_counts = sorted(list(set(worker_counts)))  # Remove duplicates and sort
-        
-        logger.info(f"Will test worker counts: {worker_counts}")
-        
-        for worker_count in worker_counts:
-            # Test current worker count
+        def test_and_get_metrics(worker_count):
+            """Helper function to test a worker count and return metrics."""
             metrics = self.test_worker_count(worker_count)
             if not metrics:
                 logger.warning(f"Failed to get metrics for {worker_count} workers, skipping...")
-                continue
+                return None
                 
             # Store results
             self.optimization_data['worker_counts'][str(worker_count)] = metrics
             
-            # If we see a significant drop in performance, we can stop testing higher counts
-            if worker_count > self.min_workers:
-                prev_metrics = self.optimization_data['worker_counts'].get(str(worker_count - 1))
-                if prev_metrics:
-                    # Only consider actual downloads for performance comparison
-                    prev_speed = prev_metrics['speed_mbps']
-                    curr_speed = metrics['speed_mbps']
-                    prev_success = prev_metrics['success_rate']
-                    curr_success = metrics['success_rate']
-                    
-                    # If current performance is significantly worse than previous
-                    if (curr_speed < prev_speed * 0.8 or  # 20% slower
-                        curr_success < prev_success * 0.9):  # 10% lower success rate
-                        logger.info(f"Performance degraded at {worker_count} workers, stopping tests")
-                        logger.info(f"Previous speed: {prev_speed:.2f} MB/s, Current speed: {curr_speed:.2f} MB/s")
-                        logger.info(f"Previous success rate: {prev_success:.2%}, Current success rate: {curr_success:.2%}")
-                        break
+            # Log performance metrics for this configuration
+            logger.info(f"Results for {worker_count} workers:")
+            logger.info(f"  Speed: {metrics['speed_mbps']:.2f} MB/s")
+            logger.info(f"  Success rate: {metrics['success_rate']:.2%}")
+            logger.info(f"  Processed: {metrics['processed_count']}")
+            logger.info(f"  Failed: {metrics['failed_count']}")
+            logger.info(f"  Skipped: {metrics['skipped_count']}")
+            
+            return metrics
         
-        # Find the best worker count
+        # Test worker counts in a specific order to find optimal throughput
+        # Start with 1 worker as baseline
+        current_workers = 1
+        current_metrics = test_and_get_metrics(current_workers)
+        if not current_metrics:
+            logger.error("Failed to test with 1 worker")
+            return self.initial_workers
+            
+        best_workers = current_workers
+        best_speed = current_metrics['speed_mbps']
+        
+        # Test 2 workers to see if we can improve throughput
+        next_metrics = test_and_get_metrics(2)
+        if next_metrics and next_metrics['speed_mbps'] > best_speed:
+            best_workers = 2
+            best_speed = next_metrics['speed_mbps']
+        
+        # Test 3 workers
+        next_metrics = test_and_get_metrics(3)
+        if next_metrics and next_metrics['speed_mbps'] > best_speed:
+            best_workers = 3
+            best_speed = next_metrics['speed_mbps']
+        
+        # Test 4 workers
+        next_metrics = test_and_get_metrics(4)
+        if next_metrics and next_metrics['speed_mbps'] > best_speed:
+            best_workers = 4
+            best_speed = next_metrics['speed_mbps']
+        
+        # Test 5 workers
+        next_metrics = test_and_get_metrics(5)
+        if next_metrics and next_metrics['speed_mbps'] > best_speed:
+            best_workers = 5
+            best_speed = next_metrics['speed_mbps']
+        
+        # Test 8 workers (common power of 2)
+        next_metrics = test_and_get_metrics(8)
+        if next_metrics and next_metrics['speed_mbps'] > best_speed:
+            best_workers = 8
+            best_speed = next_metrics['speed_mbps']
+        
+        # Test 16 workers (max)
+        next_metrics = test_and_get_metrics(16)
+        if next_metrics and next_metrics['speed_mbps'] > best_speed:
+            best_workers = 16
+            best_speed = next_metrics['speed_mbps']
+        
+        # Find the best worker count from all tested configurations
         best_worker_count = None
         best_speed = 0
         
         for worker_count, metrics in self.optimization_data['worker_counts'].items():
-            if (metrics['success_rate'] >= MIN_SUCCESS_RATE and 
-                metrics['speed_mbps'] > best_speed):
+            # Skip if we don't have complete data
+            if 'estimated_completion' not in metrics:
+                logger.warning(f"Skipping worker count {worker_count} - missing completion data")
+                continue
+                
+            # Only consider configurations with 100% success rate
+            if metrics['success_rate'] >= 0.99 and metrics['speed_mbps'] > best_speed:
                 best_worker_count = int(worker_count)
                 best_speed = metrics['speed_mbps']
         
@@ -243,14 +314,38 @@ class WorkerOptimizer:
             # Print summary
             logger.info("\nOptimization Summary:")
             logger.info(f"Best worker count: {optimal_workers}")
-            logger.info("\nDetailed results:")
-            for worker_count, metrics in self.optimization_data['worker_counts'].items():
-                logger.info(f"\nWorkers: {worker_count}")
-                logger.info(f"  Speed: {metrics['speed_mbps']:.2f} MB/s")
-                logger.info(f"  Success rate: {metrics['success_rate']:.2%}")
-                logger.info(f"  Processed: {metrics['processed_count']}")
-                logger.info(f"  Failed: {metrics['failed_count']}")
-                logger.info(f"  Skipped: {metrics['skipped_count']}")
+            
+            # Create a formatted table of all results
+            logger.info("\nDetailed Results Table:")
+            # Header
+            logger.info(f"{'Workers':>6} {'Speed (MB/s)':>12} {'Success Rate':>12} {'Days (1MB avg)':>12} {'Days (2MB avg)':>12}")
+            logger.info("-" * 60)
+            
+            # Sort worker counts numerically
+            worker_counts = sorted([int(w) for w in self.optimization_data['worker_counts'].keys()])
+            
+            for worker_count in worker_counts:
+                try:
+                    metrics = self.optimization_data['worker_counts'][str(worker_count)]
+                    if 'estimated_completion' not in metrics:
+                        logger.warning(f"Skipping worker count {worker_count} - missing completion data")
+                        continue
+                        
+                    time_1mb = metrics['estimated_completion']['1.0MB']['days']
+                    time_2mb = metrics['estimated_completion']['2.0MB']['days']
+                    
+                    # Format the row
+                    row = (
+                        f"{worker_count:>6} "
+                        f"{metrics['speed_mbps']:>12.2f} "
+                        f"{metrics['success_rate']:>12.2%} "
+                        f"{time_1mb:>12.1f} "
+                        f"{time_2mb:>12.1f}"
+                    )
+                    logger.info(row)
+                except Exception as e:
+                    logger.warning(f"Skipping worker count {worker_count} - error processing data: {e}")
+                    continue
             
             return optimal_workers
             
