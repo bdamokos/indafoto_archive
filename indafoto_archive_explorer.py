@@ -3,6 +3,7 @@
 # We should be able to mark images worth preserving and save this info to database with a reference to the image (e.g. the ID of the image)
 
 from flask import Flask, render_template, request, jsonify, send_file, abort, redirect, url_for
+from werkzeug.utils import secure_filename
 import sqlite3
 import os
 from datetime import datetime
@@ -822,8 +823,9 @@ def serve_static(filename):
     """Serve static files."""
     try:
         base_path = os.path.join(os.getcwd(), 'static')
-        full_path = os.path.normpath(os.path.join(base_path, filename))
-        if not full_path.startswith(base_path) or os.path.isabs(filename):
+        safe_filename = secure_filename(filename)
+        full_path = os.path.normpath(os.path.join(base_path, safe_filename))
+        if not full_path.startswith(base_path):
             abort(404)
         return send_file(full_path)
     except Exception as e:
