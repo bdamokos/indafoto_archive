@@ -12,7 +12,7 @@ The default setting is to save freely licensed images. Change SEARCH_URL_TEMPLAT
 
 ### Prerequisites
 
-- Python 3.6 or higher
+- Python 3.6 or higher (tested with 3.13)
 - Internet connection
 
 ### Setup Instructions
