@@ -20,6 +20,7 @@ from datetime import datetime, date
 import signal
 import sys
 import re
+from urllib.parse import unquote
 
 # Configure logging
 logging.basicConfig(
@@ -814,8 +815,38 @@ def get_image_note(image_id):
 def serve_image(image_path):
     """Serve image files."""
     try:
-        return send_file(image_path)
+        # Get the base path for images (indafoto_archive directory)
+        base_path = os.path.abspath(os.path.join(os.getcwd(), 'indafoto_archive'))
+        
+        # URL decode the path first
+        decoded_path = unquote(image_path)
+        
+        # Normalize the path to prevent path traversal
+        normalized_path = os.path.normpath(decoded_path)
+        
+        # Validate the path structure
+        if '..' in normalized_path or normalized_path.startswith('/'):
+            logger.error(f"Invalid path structure detected: {normalized_path}")
+            abort(404)
+            
+        # Remove indafoto_archive prefix if it exists
+        if normalized_path.startswith('indafoto_archive/'):
+            normalized_path = normalized_path[len('indafoto_archive/'):]
+            
+        # Construct the full path and ensure it's within the base directory
+        full_path = os.path.join(base_path, normalized_path)
+        if not os.path.abspath(full_path).startswith(base_path):
+            logger.error(f"Path traversal attempt detected: {full_path}")
+            abort(404)
+            
+        # Check if file exists and is a file (not a directory)
+        if not os.path.isfile(full_path):
+            logger.error(f"Image file not found: {full_path}")
+            abort(404)
+            
+        return send_file(full_path)
     except Exception as e:
+        logger.error(f"Error serving image {image_path}: {e}")
         abort(404)
 
 @app.route('/static/<path:filename>')
