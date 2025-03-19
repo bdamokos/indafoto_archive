@@ -81,7 +81,7 @@
     <div class="col-md-3 mb-4">
         <div class="card image-card">
             <a href="/image/{{ image.id }}">
-                <img src="/image_file/{{ image.local_path }}" class="card-img-top" alt="{{ image.title }}">
+                <img src="{{ url_for('serve_image', image_path=image.local_path) }}" class="card-img-top" alt="{{ image.title }}">
             </a>
             <button class="star-button" 
                     onclick="toggleMark({{ image.id }}, this)"
