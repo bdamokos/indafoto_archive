@@ -250,6 +250,15 @@ def init_db():
     )
     """)
     
+    # Create author_stats table to track author statistics
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS author_stats (
+        author TEXT PRIMARY KEY,
+        total_images INTEGER DEFAULT 0,
+        last_updated TEXT
+    )
+    """)
+    
     # Add error column if it doesn't exist
     try:
         cursor.execute("ALTER TABLE archive_submissions ADD COLUMN error TEXT")
