@@ -823,7 +823,7 @@ def serve_static(filename):
     try:
         base_path = os.path.join(os.getcwd(), 'static')
         full_path = os.path.normpath(os.path.join(base_path, filename))
-        if not full_path.startswith(base_path):
+        if not full_path.startswith(base_path) or os.path.isabs(filename):
             abort(404)
         return send_file(full_path)
     except Exception as e:
