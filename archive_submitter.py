@@ -356,7 +356,7 @@ class ArchiveSubmitter:
                 self.conn.commit()
                 return
                 
-            logger.info(f"Found {len(images)} unarchived images for favorite author {author_name}")
+            logger.info(f"Found {len(images)} unarchived images for favorite author {author_name} in this batch.")
             
             for page_url, author_url in images:
                 # Check if already in archive.org
