@@ -811,7 +811,7 @@ def get_image_note(image_id):
     finally:
         conn.close()
 
-@app.route('/image_file/<path:image_path>')
+@app.route('/serve_image/<path:image_path>')
 def serve_image(image_path):
     """Serve image files."""
     try:
@@ -882,13 +882,21 @@ def collection_gallery(collection_id):
     
     # Get images in collection
     cursor.execute("""
-        SELECT i.* 
+        SELECT i.*, 
+               CASE WHEN m.id IS NOT NULL THEN 1 ELSE 0 END as is_marked,
+               n.note, n.created_date as note_created_date, n.updated_date as note_updated_date
         FROM images i
         JOIN image_collections ic ON i.id = ic.image_id
+        LEFT JOIN marked_images m ON i.id = m.image_id
+        LEFT JOIN image_notes n ON i.id = n.image_id
         WHERE ic.collection_id = ?
         ORDER BY i.id DESC
     """, (collection_id,))
     images = cursor.fetchall()
+    
+    # # Log image data for debugging
+    # for image in images:
+    #     logger.info(f"Image {image['id']}: local_path={image['local_path']}, title={image['title']}")
     
     conn.close()
     
@@ -911,9 +919,13 @@ def album_gallery(album_id):
     
     # Get images in album
     cursor.execute("""
-        SELECT i.* 
+        SELECT i.*, 
+               CASE WHEN m.id IS NOT NULL THEN 1 ELSE 0 END as is_marked,
+               n.note, n.created_date as note_created_date, n.updated_date as note_updated_date
         FROM images i
         JOIN image_albums ia ON i.id = ia.image_id
+        LEFT JOIN marked_images m ON i.id = m.image_id
+        LEFT JOIN image_notes n ON i.id = n.image_id
         WHERE ia.album_id = ?
         ORDER BY i.id DESC
     """, (album_id,))
