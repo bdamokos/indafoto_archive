@@ -821,7 +821,11 @@ def serve_image(image_path):
 def serve_static(filename):
     """Serve static files."""
     try:
-        return send_file(f'static/{filename}')
+        base_path = os.path.join(os.getcwd(), 'static')
+        full_path = os.path.normpath(os.path.join(base_path, filename))
+        if not full_path.startswith(base_path):
+            abort(404)
+        return send_file(full_path)
     except Exception as e:
         abort(404)
 
