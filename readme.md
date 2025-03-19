@@ -27,7 +27,7 @@ If you need to download it from GitHub:
 3. Select "Download ZIP"
 4. Extract the ZIP file to a folder on your computer
 
-##### Alternative: Using Git
+##### Alternative: Using Git (Recommended for easy updates)
 
 <details>
 <summary>Click to expand: Using Git for installation and updates</summary>
