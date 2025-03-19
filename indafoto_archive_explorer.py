@@ -778,7 +778,7 @@ def manage_image_note():
         return jsonify({'success': True})
     except Exception as e:
         logger.error(f"Error in manage_image_note: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'An internal error has occurred!'}), 500
     finally:
         conn.close()
 
@@ -805,7 +805,7 @@ def get_image_note(image_id):
         return jsonify({'note': None})
     except Exception as e:
         logger.error(f"Error in get_image_note: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'An internal error has occurred!'}), 500
     finally:
         conn.close()
 
