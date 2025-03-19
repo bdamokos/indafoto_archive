@@ -375,38 +375,38 @@ class ArchiveSubmitter:
                         logger.info(f"Submitted favorite author image to archive.ph: {page_url}")
                         self.update_submission_status(page_url, 'pending', 'archive.ph')
                 
-                # Also submit author page if available
-                if author_url:
-                    # Check author page
-                    archived_org_author, _ = self.check_archive_org(author_url)
-                    archived_ph_author, _ = self.check_archive_ph(author_url)
+                # # Also submit author page if available
+                # if author_url:
+                #     # Check author page
+                #     archived_org_author, _ = self.check_archive_org(author_url)
+                #     archived_ph_author, _ = self.check_archive_ph(author_url)
                     
-                    if not archived_org_author:
-                        if self.submit_to_archive_org(author_url):
-                            logger.info(f"Submitted author page to archive.org: {author_url}")
-                            self.update_submission_status(author_url, 'pending', 'archive.org')
+                #     if not archived_org_author:
+                #         if self.submit_to_archive_org(author_url):
+                #             logger.info(f"Submitted author page to archive.org: {author_url}")
+                #             self.update_submission_status(author_url, 'pending', 'archive.org')
                     
-                    if not archived_ph_author:
-                        if self.submit_to_archive_ph(author_url):
-                            logger.info(f"Submitted author page to archive.ph: {author_url}")
-                            self.update_submission_status(author_url, 'pending', 'archive.ph')
+                #     if not archived_ph_author:
+                #         if self.submit_to_archive_ph(author_url):
+                #             logger.info(f"Submitted author page to archive.ph: {author_url}")
+                #             self.update_submission_status(author_url, 'pending', 'archive.ph')
                     
-                    # Submit author details page
-                    details_url = f"{author_url}/details"
-                    archived_org_details, _ = self.check_archive_org(details_url)
-                    archived_ph_details, _ = self.check_archive_ph(details_url)
+                #     # Submit author details page
+                #     details_url = f"{author_url}/details"
+                #     archived_org_details, _ = self.check_archive_org(details_url)
+                #     archived_ph_details, _ = self.check_archive_ph(details_url)
                     
-                    if not archived_org_details:
-                        if self.submit_to_archive_org(details_url):
-                            logger.info(f"Submitted author details to archive.org: {details_url}")
-                            self.update_submission_status(details_url, 'pending', 'archive.org')
+                #     if not archived_org_details:
+                #         if self.submit_to_archive_org(details_url):
+                #             logger.info(f"Submitted author details to archive.org: {details_url}")
+                #             self.update_submission_status(details_url, 'pending', 'archive.org')
                     
-                    if not archived_ph_details:
-                        if self.submit_to_archive_ph(details_url):
-                            logger.info(f"Submitted author details to archive.ph: {details_url}")
-                            self.update_submission_status(details_url, 'pending', 'archive.ph')
+                #     if not archived_ph_details:
+                #         if self.submit_to_archive_ph(details_url):
+                #             logger.info(f"Submitted author details to archive.ph: {details_url}")
+                #             self.update_submission_status(details_url, 'pending', 'archive.ph')
                 
-                time.sleep(5)  # Rate limiting
+                # time.sleep(5)  # Rate limiting
             
             # Update last processed date after processing batch
             self.cursor.execute("""
