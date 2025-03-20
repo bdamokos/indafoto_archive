@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+
+{% block title %}Manage Banned Authors - Indafoto Archive{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-12">
+        <h1 class="mb-4">Manage Banned Authors</h1>
+        
+        <!-- Add new banned author form -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Add New Banned Author</h5>
+            </div>
+            <div class="card-body">
+                <form id="banAuthorForm" method="POST" action="/api/banned_authors">
+                    <div class="mb-3">
+                        <label for="author" class="form-label">Author Name</label>
+                        <input type="text" class="form-control" id="author" name="author" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="reason" class="form-label">Reason for Ban</label>
+                        <textarea class="form-control" id="reason" name="reason" rows="3" required></textarea>
+                    </div>
+                    <button type="submit" class="btn btn-danger">Add to Banned List</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- List of banned authors -->
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Currently Banned Authors</h5>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th>Author</th>
+                                <th>Reason</th>
+                                <th>Banned Date</th>
+                                <th>Banned By</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for author in banned_authors %}
+                            <tr>
+                                <td>{{ author.author }}</td>
+                                <td>{{ author.reason }}</td>
+                                <td>{{ author.banned_date }}</td>
+                                <td>{{ author.banned_by }}</td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-danger" 
+                                            onclick="removeBan('{{ author.author }}')">
+                                        Remove Ban
+                                    </button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.getElementById('banAuthorForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const formData = new FormData(this);
+    const data = {
+        author: formData.get('author'),
+        reason: formData.get('reason')
+    };
+    
+    try {
+        const response = await fetch('/api/banned_authors', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(data)
+        });
+        
+        const result = await response.json();
+        if (result.success) {
+            alert('Author successfully banned');
+            location.reload();
+        } else {
+            alert('Failed to ban author: ' + result.error);
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        alert('Failed to ban author. Please try again.');
+    }
+});
+
+async function removeBan(author) {
+    if (!confirm(`Are you sure you want to remove the ban for ${author}?`)) {
+        return;
+    }
+    
+    try {
+        const response = await fetch(`/api/banned_authors/${encodeURIComponent(author)}`, {
+            method: 'DELETE'
+        });
+        
+        const result = await response.json();
+        if (result.success) {
+            alert('Ban successfully removed');
+            location.reload();
+        } else {
+            alert('Failed to remove ban: ' + result.error);
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        alert('Failed to remove ban. Please try again.');
+    }
+}
+</script>
+{% endblock %} 

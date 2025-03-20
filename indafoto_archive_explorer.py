@@ -21,6 +21,7 @@ import signal
 import sys
 import re
 from urllib.parse import unquote
+from indafoto import init_db as indafoto_init_db, get_banned_authors, ban_author, unban_author, cleanup_banned_author_content
 
 # Configure logging
 logging.basicConfig(
@@ -1331,6 +1332,78 @@ def browse_authors():
     conn.close()
     
     return render_template('browse_authors.html', authors=authors)
+
+@app.route('/banned_authors')
+def banned_authors():
+    """Display the banned authors management page."""
+    conn = indafoto_init_db()  # Use the init_db from indafoto.py
+    banned_authors = get_banned_authors(conn)
+    conn.close()
+    return render_template('banned_authors.html', banned_authors=banned_authors)
+
+@app.route('/api/banned_authors', methods=['POST'])
+def add_banned_author():
+    """API endpoint to add a new banned author."""
+    data = request.get_json()
+    if not data or 'author' not in data or 'reason' not in data:
+        return jsonify({'success': False, 'error': 'Missing required fields'})
+    
+    conn = indafoto_init_db()
+    try:
+        success = ban_author(conn, data['author'], data['reason'], banned_by="admin")
+        if success:
+            # Clean up existing content if requested
+            if data.get('cleanup_existing', False):
+                cleanup_banned_author_content(conn, data['author'])
+            return jsonify({'success': True})
+        else:
+            return jsonify({'success': False, 'error': 'Author is already banned'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+    finally:
+        conn.close()
+
+@app.route('/api/banned_authors/<author>', methods=['DELETE'])
+def remove_banned_author(author):
+    """API endpoint to remove a banned author."""
+    conn = indafoto_init_db()
+    try:
+        success = unban_author(conn, author)
+        if success:
+            return jsonify({'success': True})
+        else:
+            return jsonify({'success': False, 'error': 'Author is not banned'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+    finally:
+        conn.close()
+
+@app.route('/api/banned_authors/<author>/cleanup', methods=['POST'])
+def cleanup_author_content(author):
+    """API endpoint to clean up content from a banned author."""
+    conn = indafoto_init_db()
+    try:
+        success = cleanup_banned_author_content(conn, author)
+        if success:
+            return jsonify({'success': True})
+        else:
+            return jsonify({'success': False, 'error': 'Failed to clean up content'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+    finally:
+        conn.close()
+
+@app.context_processor
+def inject_nav_items():
+    return {
+        'nav_items': [
+            {'url': '/', 'text': 'Home'},
+            {'url': '/images', 'text': 'Browse Images'},
+            {'url': '/authors', 'text': 'Browse Authors'},
+            {'url': '/marked', 'text': 'Marked Images'},
+            {'url': '/banned_authors', 'text': 'Banned Authors'}
+        ]
+    }
 
 def create_app():
     """Create and configure the Flask application."""
