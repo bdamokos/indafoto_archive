@@ -39,6 +39,7 @@ BASE_TIMEOUT = 60    # Base timeout in seconds
 FILES_PER_DIR = 1000  # Maximum number of files per directory
 ARCHIVE_SAMPLE_RATE = 0.005  # 0.5% sample rate for Internet Archive submissions
 DEFAULT_WORKERS = 8  # Default number of parallel download workers
+BLOCK_SIZE = 2097152  # 2MB block size for maximum performance with 0.5-3MB images
 
 # Adaptive rate limiting and worker scaling configuration
 MIN_WORKERS = 1  # Minimum number of workers
@@ -407,11 +408,14 @@ def parse_hungarian_date(date_str):
         logger.warning(f"Failed to parse Hungarian date '{date_str}': {e}")
     return None
 
-def extract_metadata(photo_page_url, attempt=1):
+def extract_metadata(photo_page_url, attempt=1, session=None):
     """Extract metadata from a photo page."""
     try:
         timeout = BASE_TIMEOUT * attempt  # Progressive timeout
-        response = requests.get(photo_page_url, headers=HEADERS, cookies=COOKIES, timeout=timeout)
+        if session:
+            response = session.get(photo_page_url, timeout=timeout)
+        else:
+            response = requests.get(photo_page_url, headers=HEADERS, cookies=COOKIES, timeout=timeout)
         if not response.ok:
             logger.error(f"Failed to fetch metadata from {photo_page_url}: HTTP {response.status_code}")
             return None
@@ -686,7 +690,7 @@ def calculate_file_hash(filepath):
         logger.error(f"Failed to calculate hash for {filepath}: {e}")
         return None
 
-def download_image(image_url, author):
+def download_image(image_url, author, session=None):
     """Download an image and save locally. Returns (filename, hash) tuple or (None, None) if failed."""
     try:
         # Get the directory for this author
@@ -722,14 +726,19 @@ def download_image(image_url, author):
                     logger.warning(f"Another thread is downloading {filename}, skipping")
                     return None, None
                 
-                response = requests.get(image_url, headers=HEADERS, timeout=60, stream=True)
+                # Use the provided session if available, otherwise make direct request
+                if session:
+                    response = session.get(image_url, timeout=60, stream=True)
+                else:
+                    response = requests.get(image_url, headers=HEADERS, timeout=60, stream=True)
+                
                 response.raise_for_status()
                 
                 total_size = int(response.headers.get('content-length', 0))
                 if total_size == 0:
                     raise ValueError("Server reported content length of 0")
                     
-                block_size = 1024
+                block_size = BLOCK_SIZE  # Use the global BLOCK_SIZE constant
                 downloaded_size = 0
                 
                 # Calculate hash while downloading
@@ -1138,6 +1147,18 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
     results_queue = queue.Queue()                         # Buffer for completed downloads
     error_queue = queue.Queue()                          # Buffer for errors
     
+    # Create session pool
+    session_pool = queue.Queue(maxsize=current_workers * 2)
+    for _ in range(current_workers * 2):
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        session.cookies.update(COOKIES)
+        # Configure session for better performance
+        adapter = requests.adapters.HTTPAdapter(pool_maxsize=5, pool_block=True)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+        session_pool.put(session)
+    
     def metadata_worker():
         """Worker function for metadata extraction."""
         while True:
@@ -1147,18 +1168,24 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                     metadata_queue.task_done()
                     break
                     
+                # Get a session from the pool
+                session = session_pool.get()
+                
                 try:
-                    metadata = extract_metadata(image_data['page_url'])
+                    metadata = extract_metadata(image_data['page_url'], session=session)
                     if metadata:
                         # Try to get high-res version URL
                         url = image_data['image_url']
-                        high_res_url = get_high_res_url(url)
+                        high_res_url = get_high_res_url(url, session=session)
                         download_url = high_res_url if high_res_url else url
                         download_queue.put((download_url, metadata))
                     else:
                         error_queue.put(('metadata', image_data['page_url'], "Failed to extract metadata"))
                 except Exception as e:
                     error_queue.put(('metadata', image_data['page_url'], str(e)))
+                finally:
+                    # Return the session to the pool
+                    session_pool.put(session)
                 
                 metadata_queue.task_done()
             except Exception as e:
@@ -1174,9 +1201,12 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                     download_queue.task_done()
                     break
                     
+                # Get a session from the pool
+                session = session_pool.get()
+                
                 url, metadata = item
                 try:
-                    result = download_image(url, metadata['author'])
+                    result = download_image(url, metadata['author'], session=session)
                     if result:
                         local_path, file_hash = result
                         results_queue.put((local_path, file_hash, url, metadata))
@@ -1184,6 +1214,9 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                         error_queue.put(('download', url, "Failed to download image"))
                 except Exception as e:
                     error_queue.put(('download', url, str(e)))
+                finally:
+                    # Return the session to the pool
+                    session_pool.put(session)
                 
                 download_queue.task_done()
             except Exception as e:
@@ -1902,7 +1935,7 @@ def redownload_author_images(author_name):
     
     conn.close()
 
-def get_high_res_url(url):
+def get_high_res_url(url, session=None):
     """Try to get the highest resolution version of an image URL."""
     if '_l.jpg' not in url:
         return url
@@ -1910,7 +1943,10 @@ def get_high_res_url(url):
     for res in ['_xxl.jpg', '_xl.jpg']:
         test_url = url.replace('_l.jpg', res)
         try:
-            head_response = requests.head(test_url, headers=HEADERS, timeout=5)
+            if session:
+                head_response = session.head(test_url, timeout=5)
+            else:
+                head_response = requests.head(test_url, headers=HEADERS, timeout=5)
             if head_response.ok:
                 return test_url
         except:
