@@ -313,16 +313,13 @@ def get_image_links(search_page_url, attempt=1, session=None):
     try:
         logger.info(f"Attempting to fetch URL: {search_page_url} (attempt {attempt})")
         timeout = BASE_TIMEOUT * attempt  # Progressive timeout
-        if session:
-            response = session.get(search_page_url, timeout=timeout)
-        else:
-            response = requests.get(
-                search_page_url,
-                headers=HEADERS,
-                cookies=COOKIES,
-                timeout=timeout,
-                allow_redirects=True
-            )
+        
+        # Use cached session if available
+        if session is None:
+            from cache_utils import init_cache
+            session = init_cache()
+        
+        response = session.get(search_page_url, timeout=timeout)
         
         # Log response details
         logger.info(f"Response status code: {response.status_code}")
@@ -436,10 +433,13 @@ def extract_metadata(photo_page_url, attempt=1, session=None):
     """Extract metadata from a photo page."""
     try:
         timeout = BASE_TIMEOUT * attempt  # Progressive timeout
-        if session:
-            response = session.get(photo_page_url, timeout=timeout)
-        else:
-            response = requests.get(photo_page_url, headers=HEADERS, cookies=COOKIES, timeout=timeout)
+        
+        # Use cached session if available
+        if session is None:
+            from cache_utils import init_cache
+            session = init_cache()
+            
+        response = session.get(photo_page_url, timeout=timeout)
         if not response.ok:
             logger.error(f"Failed to fetch metadata from {photo_page_url}: HTTP {response.status_code}")
             return None
@@ -662,7 +662,7 @@ def extract_metadata(photo_page_url, attempt=1, session=None):
             for pattern in img_patterns:
                 test_url = re.sub(r'_[a-z]+\.jpg$', pattern, base_url)
                 try:
-                    head_response = requests.head(test_url, headers=HEADERS, timeout=5)
+                    head_response = session.head(test_url, timeout=5)
                     if head_response.ok:
                         high_res_url = test_url
                         break

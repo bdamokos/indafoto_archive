@@ -12,3 +12,5 @@ archive_submitter.log
 worker_optimization.log
 worker_optimization.json
 __pycache__/
+indafoto_cache/
+indafoto_cache.log
