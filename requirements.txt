@@ -4,3 +4,4 @@ beautifulsoup4
 flask
 Pillow
 portalocker
+requests_cache
