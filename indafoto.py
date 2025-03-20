@@ -124,6 +124,12 @@ def init_db():
     except sqlite3.OperationalError:
         pass  # Column already exists
     
+    # Add camera_make column if it doesn't exist (for backwards compatibility)
+    try:
+        cursor.execute("ALTER TABLE images ADD COLUMN camera_make TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    
     # Add sha256_hash column if it doesn't exist (for backwards compatibility)
     try:
         cursor.execute("ALTER TABLE images ADD COLUMN sha256_hash TEXT")
@@ -286,15 +292,20 @@ def get_image_directory(author):
     
     return subdir
 
-def get_image_links(search_page_url, attempt=1):
+def get_image_links(search_page_url, attempt=1, session=None):
     """Extract image links from a search result page."""
     try:
         logger.info(f"Attempting to fetch URL: {search_page_url} (attempt {attempt})")
         timeout = BASE_TIMEOUT * attempt  # Progressive timeout
-        response = requests.get(
+        
+        # Use provided session or create a new one
+        if session is None:
+            session = requests.Session()
+            session.headers.update(HEADERS)
+            session.cookies.update(COOKIES)
+        
+        response = session.get(
             search_page_url,
-            headers=HEADERS,
-            cookies=COOKIES,
             timeout=timeout,
             allow_redirects=True
         )
@@ -407,270 +418,101 @@ def parse_hungarian_date(date_str):
         logger.warning(f"Failed to parse Hungarian date '{date_str}': {e}")
     return None
 
-def extract_metadata(photo_page_url, attempt=1):
+def extract_metadata(photo_page_url, attempt=1, session=None):
     """Extract metadata from a photo page."""
     try:
-        timeout = BASE_TIMEOUT * attempt  # Progressive timeout
-        response = requests.get(photo_page_url, headers=HEADERS, cookies=COOKIES, timeout=timeout)
-        if not response.ok:
-            logger.error(f"Failed to fetch metadata from {photo_page_url}: HTTP {response.status_code}")
+        if not photo_page_url:
+            logger.warning("No photo page URL provided")
             return None
-
+            
+        if session is None:
+            session = requests.Session()
+            session.headers.update(HEADERS)
+            session.cookies.update(COOKIES)
+        
+        response = session.get(photo_page_url, timeout=BASE_TIMEOUT)
+        response.raise_for_status()
+        
         soup = BeautifulSoup(response.text, "html.parser")
         
-        # Extract title from h1 tag
-        title = soup.find("h1", class_="image_title")
-        if title:
-            title = title.text.strip()
-        else:
-            title_meta = soup.find("meta", property="og:title")
-            title = title_meta["content"] if title_meta else "Unknown"
-
-        # Extract description from desc div
-        description = None
-        desc_div = soup.find("div", class_="desc")
-        if desc_div:
-            description = desc_div.text.strip()
-
-        # Extract author from user_name class
-        author_container = soup.find("h2", class_="user_name")
-        author = "Unknown"
-        author_url = None
-        if author_container:
-            author_link = author_container.find("a")
-            if author_link:
-                author = author_link.text.strip()
-                author_url = author_link.get('href')
-
-        # Extract license information with version from cc_container
-        license_info = "Unknown"
-        cc_container = soup.find("div", class_="cc_container")
-        if cc_container:
-            license_link = cc_container.find("a")
-            if license_link:
-                license_href = license_link.get('href', '')
-                # Updated regex to properly capture country code from the URL path
-                version_match = re.search(r'/licenses/([^/]+)/(\d+\.\d+)(?:/([a-zA-Z]{2}))?/?$', license_href)
-                if version_match:
-                    license_type, version, country = version_match.groups()
-                    # Format as "CC TYPE VERSION COUNTRY" (e.g. "CC BY 2.5 HU")
-                    license_info = f"CC {license_type.upper()} {version}"
-                    if country:
-                        license_info += f" {country.upper()}"
-
-        # Extract collections and albums
-        collections = []
-        albums = []
-        
-        # Extract collections ("Gyűjteményekben")
-        collections_section = soup.find("section", class_="compilations")
-        if collections_section:
-            collections_container = collections_section.find("ul", class_="collections_container")
-            if collections_container:
-                for li in collections_container.find_all("li", class_=lambda x: x and "collection_" in x):
-                    collection_id = None
-                    for class_name in li.get('class', []):
-                        if class_name.startswith('collection_'):
-                            collection_id = class_name.split('_')[1]
-                            break
-                    
-                    collection_link = li.find("a")
-                    if collection_link and collection_id:
-                        # Try different ways to get the title
-                        collection_title = None
-                        # First try the album_title span
-                        title_span = collection_link.find("span", class_="album_title")
-                        if title_span:
-                            collection_title = title_span.get_text(strip=True)
-                        # If that fails, try getting the link text directly
-                        if not collection_title:
-                            collection_title = collection_link.get_text(strip=True)
-                        
-                        # If still no title, try looking for the text directly in the li element
-                        if not collection_title:
-                            collection_title = li.get_text(strip=True)
-                        
-                        if collection_title:
-                            collections.append({
-                                'id': collection_id,
-                                'title': collection_title,
-                                'url': collection_link.get('href'),
-                                'is_public': 'public' in li.get('class', [])
-                            })
-
-        # Extract albums ("Albumokban")
-        albums_section = soup.find("section", class_="collections")
-        if albums_section and "Albumokban" in albums_section.get_text():
-            albums_container = albums_section.find("ul", class_="collections_container")
-            if albums_container:
-                for li in albums_container.find_all("li", class_=lambda x: x and "collection_" in x):
-                    album_id = None
-                    for class_name in li.get('class', []):
-                        if class_name.startswith('collection_'):
-                            album_id = class_name.split('_')[1]
-                            break
-                    
-                    album_link = li.find("a")
-                    if album_link and album_id:
-                        # Try different ways to get the title
-                        album_title = None
-                        # First try the album_title span
-                        title_span = album_link.find("span", class_="album_title")
-                        if title_span:
-                            album_title = title_span.get_text(strip=True)
-                        # If that fails, try getting the link text directly
-                        if not album_title:
-                            album_title = album_link.get_text(strip=True)
-                        
-                        # If still no title, try looking for the text directly in the li element
-                        if not album_title:
-                            album_title = li.get_text(strip=True)
-                        
-                        if album_title:
-                            albums.append({
-                                'id': album_id,
-                                'title': album_title,
-                                'url': album_link.get('href'),
-                                'is_public': 'public' in li.get('class', [])
-                            })
-
-        # Extract tags - try multiple possible locations
-        tags = []
-        
-        # First try to find the tags box
-        tags_box = soup.find("div", class_="tags box")
-        if tags_box:
-            # Look for box_data div inside the tags box
-            tags_container = tags_box.find("div", class_="box_data")
-            if tags_container:
-                for tag_li in tags_container.find_all("li", class_="tag"):
-                    tag_link = tag_li.find("a", class_="global-tag")
-                    if tag_link:
-                        tag_name = tag_link.get_text(strip=True)
-                        # Extract count from title attribute (e.g., "Az összes kuba címkéjű kép (2714 db)")
-                        count_match = re.search(r'\((\d+)\s*db\)', tag_link.get('title', ''))
-                        count = int(count_match.group(1)) if count_match else 0
-                        tags.append({
-                            'name': tag_name,
-                            'count': count
-                        })
-        
-        # If no tags found, try looking for tags in other locations
-        if not tags:
-            # Try finding all global-tag links anywhere in the page
-            tag_links = soup.find_all("a", class_="global-tag")
-            for tag_link in tag_links:
-                tag_name = tag_link.get_text(strip=True)
-                # Extract count from title attribute
-                count_match = re.search(r'\((\d+)\s*db\)', tag_link.get('title', ''))
-                count = int(count_match.group(1)) if count_match else 0
-                tags.append({
-                    'name': tag_name,
-                    'count': count
-                })
-        
-        # Remove duplicates while preserving order
-        seen = set()
-        tags = [tag for tag in tags if not (tag['name'] in seen or seen.add(tag['name']))]
-
-        # Extract EXIF data from the table
-        exif_data = {}
-        exif_table = soup.find('table')
-        if exif_table:
-            for row in exif_table.find_all('tr'):
-                cols = row.find_all('td')
-                if len(cols) == 2:
-                    key = cols[0].text.strip().rstrip(':')
-                    value = cols[1].text.strip()
-                    exif_data[key] = value
-
-        # Extract camera make and model from the manufacturer link
-        camera_make = None
-        camera_model = None
-        if 'Gyártó' in exif_data:
-            manufacturer_link = soup.find('a', href=lambda x: x and '/fenykepezogep/' in x)
-            if manufacturer_link:
-                href = manufacturer_link.get('href', '')
-                full_text = manufacturer_link.get_text(strip=True)
-                # Extract make and model from href (e.g., /fenykepezogep/apple/iphone_se_(2nd_generation))
-                parts = href.split('/')
-                if len(parts) >= 4:  # We expect at least 4 parts: ['', 'fenykepezogep', 'make', 'model']
-                    # Find the position in the full text where the model part starts
-                    # by looking for the first character after the make name
-                    make_part = parts[2]
-                    # Find the position in the full text where the make part ends
-                    # This will be the first space after the make name
-                    make_end_pos = len(make_part)
-                    # Split the full text at this position
-                    camera_make = full_text[:make_end_pos].strip()
-                    camera_model = full_text[make_end_pos:].strip()
-            else:
-                # Fallback to using the raw text if no link found
-                camera_make = exif_data['Gyártó']
-
-        # Extract taken date from EXIF
-        taken_date = None
-        if 'Készült' in exif_data:
-            taken_date = parse_hungarian_date(exif_data['Készült'])
-
-        # Extract upload date from image_data div
-        upload_date = None
-        upload_date_elem = soup.find('li', class_='upload_date')
-        if upload_date_elem:
-            date_value = upload_date_elem.find('span', class_='value')
-            if date_value:
-                upload_date = parse_hungarian_date(date_value.text.strip())
-
-        # Find highest resolution image URL
-        high_res_url = None
-        # First look for direct image URLs
-        img_patterns = ['_xxl.jpg', '_xl.jpg', '_l.jpg', '_m.jpg']
-        
-        # Try to find the image URL from meta tags first
-        og_image = soup.find("meta", property="og:image")
-        if og_image and og_image.get("content"):
-            base_url = og_image["content"]
-            # Replace the resolution suffix to get higher resolution
-            for pattern in img_patterns:
-                test_url = re.sub(r'_[a-z]+\.jpg$', pattern, base_url)
-                try:
-                    head_response = requests.head(test_url, headers=HEADERS, timeout=5)
-                    if head_response.ok:
-                        high_res_url = test_url
-                        break
-                except:
-                    continue
-        
-        # Fallback to looking for direct links if meta tag approach failed
-        if not high_res_url:
-            for pattern in img_patterns:
-                img_link = soup.find('a', href=lambda x: x and pattern in x)
-                if img_link:
-                    high_res_url = img_link['href']
-                    break
-
+        # Extract metadata
         metadata = {
-            'title': title,
-            'description': description,
-            'author': author,
-            'author_url': author_url,
-            'license': license_info,
-            'collections': collections,
-            'albums': albums,
-            'camera_make': camera_make,
-            'camera_model': camera_model,
-            'focal_length': exif_data.get('Fókusztáv'),
-            'aperture': exif_data.get('Rekesz'),
-            'shutter_speed': exif_data.get('Zársebesség'),
-            'taken_date': taken_date,
-            'upload_date': upload_date,
-            'page_url': photo_page_url,
-            'tags': tags
+            'author': None,
+            'title': None,
+            'description': None,
+            'camera_make': None,
+            'camera_model': None,
+            'focal_length': None,
+            'aperture': None,
+            'shutter_speed': None,
+            'taken_date': None,
+            'upload_date': None,
+            'page_url': photo_page_url
         }
-
+        
+        # Extract author
+        author_elem = soup.find('a', class_='user-name')
+        if author_elem:
+            metadata['author'] = author_elem.text.strip()
+        
+        # Extract title
+        title_elem = soup.find('h1', class_='photo-title')
+        if title_elem:
+            metadata['title'] = title_elem.text.strip()
+        
+        # Extract description
+        desc_elem = soup.find('div', class_='photo-description')
+        if desc_elem:
+            metadata['description'] = desc_elem.text.strip()
+        
+        # Extract camera info
+        camera_info = soup.find('div', class_='camera-info')
+        if camera_info:
+            # Extract camera model
+            model_elem = camera_info.find('span', class_='camera-model')
+            if model_elem:
+                metadata['camera_model'] = model_elem.text.strip()
+            
+            # Extract camera make
+            make_elem = camera_info.find('span', class_='camera-make')
+            if make_elem:
+                metadata['camera_make'] = make_elem.text.strip()
+            
+            # Extract focal length
+            focal_elem = camera_info.find('span', class_='focal-length')
+            if focal_elem:
+                metadata['focal_length'] = focal_elem.text.strip()
+            
+            # Extract aperture
+            aperture_elem = camera_info.find('span', class_='aperture')
+            if aperture_elem:
+                metadata['aperture'] = aperture_elem.text.strip()
+            
+            # Extract shutter speed
+            shutter_elem = camera_info.find('span', class_='shutter-speed')
+            if shutter_elem:
+                metadata['shutter_speed'] = shutter_elem.text.strip()
+        
+        # Extract dates
+        date_info = soup.find('div', class_='date-info')
+        if date_info:
+            # Extract taken date
+            taken_elem = date_info.find('span', class_='taken-date')
+            if taken_elem:
+                metadata['taken_date'] = taken_elem.text.strip()
+            
+            # Extract upload date
+            upload_elem = date_info.find('span', class_='upload-date')
+            if upload_elem:
+                metadata['upload_date'] = upload_elem.text.strip()
+        
         return metadata
+        
     except Exception as e:
         logger.error(f"Error extracting metadata from {photo_page_url}: {e}")
+        if attempt < 3:  # Retry up to 3 times
+            time.sleep(BASE_RATE_LIMIT)
+            return extract_metadata(photo_page_url, attempt + 1, session=session)
         return None
 
 def calculate_file_hash(filepath):
@@ -686,7 +528,7 @@ def calculate_file_hash(filepath):
         logger.error(f"Failed to calculate hash for {filepath}: {e}")
         return None
 
-def download_image(image_url, author):
+def download_image(image_url, author, session=None, block_size_kb=1024):
     """Download an image and save locally. Returns (filename, hash) tuple or (None, None) if failed."""
     try:
         # Get the directory for this author
@@ -722,80 +564,81 @@ def download_image(image_url, author):
                     logger.warning(f"Another thread is downloading {filename}, skipping")
                     return None, None
                 
-                response = requests.get(image_url, headers=HEADERS, timeout=60, stream=True)
-                response.raise_for_status()
+                # Use provided session or create a new one
+                if session is None:
+                    session = requests.Session()
+                    session.headers.update(HEADERS)
+                    session.cookies.update(COOKIES)
+                    
+                    # Configure session for better performance
+                    session.mount('https://', requests.adapters.HTTPAdapter(
+                        max_retries=3,
+                        pool_connections=100,
+                        pool_maxsize=100
+                    ))
                 
-                total_size = int(response.headers.get('content-length', 0))
+                # First get the file size and headers
+                head_response = session.head(image_url, timeout=30)
+                head_response.raise_for_status()
+                
+                total_size = int(head_response.headers.get('content-length', 0))
                 if total_size == 0:
                     raise ValueError("Server reported content length of 0")
-                    
-                block_size = 1024
+                
+                # Convert block size from KB to bytes
+                block_size = block_size_kb * 1024
                 downloaded_size = 0
                 
                 # Calculate hash while downloading
                 sha256_hash = hashlib.sha256()
                 
-                with open(temp_filename, "wb") as file, tqdm(
+                # Use the specified block size for writing
+                with open(temp_filename, "wb", buffering=block_size) as file, tqdm(
                     total=total_size,
                     unit='B',
                     unit_scale=True,
                     desc=f"Downloading {os.path.basename(filename)}",
                     colour='green'
                 ) as pbar:
-                    for chunk in response.iter_content(block_size):
-                        if not chunk:  # Filter out keep-alive chunks
-                            continue
-                        file.write(chunk)
-                        sha256_hash.update(chunk)
-                        downloaded_size += len(chunk)
-                        pbar.update(len(chunk))
+                    # Stream the response with the specified block size
+                    response = session.get(image_url, stream=True, timeout=60)
+                    response.raise_for_status()
+                    
+                    for chunk in response.iter_content(chunk_size=block_size):
+                        if chunk:  # Only process non-empty chunks
+                            file.write(chunk)
+                            sha256_hash.update(chunk)
+                            downloaded_size += len(chunk)
+                            pbar.update(len(chunk))
                 
                 # Verify the download
-                if downloaded_size != total_size:
+                if downloaded_size != total_size and total_size > 0:
                     logger.error(f"Download size mismatch for {image_url}. Expected {total_size}, got {downloaded_size}")
-                    os.remove(temp_filename)
+                    # Clean up the temporary file
+                    if os.path.exists(temp_filename):
+                        os.remove(temp_filename)
                     return None, None
-                    
-                # Verify it's a valid JPEG
-                try:
-                    from PIL import Image
-                    with Image.open(temp_filename) as img:
-                        if img.format != 'JPEG':
-                            raise ValueError(f"Downloaded file is not a JPEG (format: {img.format})")
-                        # Force load the image to verify it's not corrupted
-                        img.load()
-                except Exception as e:
-                    logger.error(f"Invalid image file downloaded from {image_url}: {e}")
-                    os.remove(temp_filename)
-                    return None, None
-                    
-                # If all validation passes, move the temp file to final location
-                os.rename(temp_filename, filename)
                 
-                file_hash = sha256_hash.hexdigest()
-                logger.info(f"Successfully downloaded and validated image to {filename} (SHA-256: {file_hash})")
-                return filename, file_hash
+                # Move the temporary file to its final location
+                shutil.move(temp_filename, filename)
                 
-        finally:
-            # Clean up the lock file
-            try:
+                # Remove the lock file
+                if os.path.exists(lock_filename):
+                    os.remove(lock_filename)
+                
+                return filename, sha256_hash.hexdigest()
+                
+        except Exception as e:
+            logger.error(f"Error downloading {image_url}: {e}")
+            # Clean up temporary files
+            if os.path.exists(temp_filename):
+                os.remove(temp_filename)
+            if os.path.exists(lock_filename):
                 os.remove(lock_filename)
-            except OSError:
-                pass
+            return None, None
             
-            # Clean up temp file if it still exists
-            try:
-                if os.path.exists(temp_filename):
-                    os.remove(temp_filename)
-            except OSError:
-                pass
-            
-    except FileExistsError:
-        # Another thread is already downloading this file
-        logger.warning(f"Another thread is downloading {filename}, skipping")
-        return None, None
     except Exception as e:
-        logger.error(f"Failed to download {image_url}: {e}")
+        logger.error(f"Error in download_image for {image_url}: {e}")
         return None, None
 
 class ArchiveSubmitter(threading.Thread):
@@ -1123,10 +966,20 @@ def retry_failed_pages(conn, cursor):
             """, (datetime.now().isoformat(), str(e), page_number))
             conn.commit()
 
-def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
+def process_image_list(image_data_list, conn, cursor, sample_rate=1.0, session=None, block_size_kb=1024):
     """Process a list of images using a pipeline pattern for metadata extraction and downloading."""
     global consecutive_failures, consecutive_successes, current_wait_time, current_workers
     
+    # Validate input to prevent NoneType errors
+    if not image_data_list:
+        logger.warning("No image data provided to process_image_list")
+        return False, {'processed_count': 0, 'failed_count': 0, 'skipped_count': 0, 'total_images': 0, 'author_counts': {}}
+    
+    # Ensure image_data_list is a list
+    if not isinstance(image_data_list, list):
+        logger.error(f"Expected list for image_data_list, got {type(image_data_list)}")
+        return False, {'processed_count': 0, 'failed_count': 1, 'skipped_count': 0, 'total_images': 1, 'author_counts': {}}
+        
     author_image_counts = {}
     processed_count = 0
     failed_count = 0
@@ -1148,13 +1001,20 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                     break
                     
                 try:
-                    metadata = extract_metadata(image_data['page_url'])
+                    metadata = extract_metadata(image_data['page_url'], session=session)
                     if metadata:
+                        # Ensure author is not None before attempting download
+                        if metadata.get('author') is None:
+                            metadata['author'] = 'unknown'
+                            
                         # Try to get high-res version URL
                         url = image_data['image_url']
-                        high_res_url = get_high_res_url(url)
-                        download_url = high_res_url if high_res_url else url
-                        download_queue.put((download_url, metadata))
+                        if url:
+                            high_res_url = get_high_res_url(url, session=session)
+                            download_url = high_res_url if high_res_url else url
+                            download_queue.put((download_url, metadata))
+                        else:
+                            error_queue.put(('metadata', image_data['page_url'], "No image URL available"))
                     else:
                         error_queue.put(('metadata', image_data['page_url'], "Failed to extract metadata"))
                 except Exception as e:
@@ -1163,6 +1023,11 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 metadata_queue.task_done()
             except Exception as e:
                 logger.error(f"Error in metadata worker: {e}")
+                # Ensure we mark the task as done even if an exception occurs
+                try:
+                    metadata_queue.task_done()
+                except:
+                    pass
                 continue
     
     def download_worker():
@@ -1174,20 +1039,24 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                     download_queue.task_done()
                     break
                     
-                url, metadata = item
+                download_url, metadata = item
                 try:
-                    result = download_image(url, metadata['author'])
-                    if result:
-                        local_path, file_hash = result
-                        results_queue.put((local_path, file_hash, url, metadata))
+                    filename, file_hash = download_image(download_url, metadata['author'], session=session, block_size_kb=block_size_kb)
+                    if filename and file_hash:
+                        results_queue.put((filename, file_hash, download_url, metadata))
                     else:
-                        error_queue.put(('download', url, "Failed to download image"))
+                        error_queue.put(('download', download_url, "Failed to download image"))
                 except Exception as e:
-                    error_queue.put(('download', url, str(e)))
+                    error_queue.put(('download', download_url, str(e)))
                 
                 download_queue.task_done()
             except Exception as e:
                 logger.error(f"Error in download worker: {e}")
+                # Ensure we mark the task as done even if an exception occurs
+                try:
+                    download_queue.task_done()
+                except:
+                    pass
                 continue
     
     try:
@@ -1476,7 +1345,7 @@ def estimate_space_requirements(downloaded_bytes, pages_processed, total_pages):
         'total_estimated_gb': (downloaded_bytes + estimated_remaining_bytes) / (2**30)
     }
 
-def crawl_images(start_offset=0, retry_mode=False):
+def crawl_images(start_offset=0, retry_mode=False, block_size_kb=1024):
     """Main function to crawl images and save metadata."""
     global current_workers, consecutive_failures, consecutive_successes, current_wait_time
     
@@ -1574,8 +1443,8 @@ def crawl_images(start_offset=0, retry_mode=False):
                         conn.commit()
                         continue
                 
-                # Process the image list
-                success, stats = process_image_list(image_data_list, conn, cursor)
+                # Process the image list with the specified block size
+                success, stats = process_image_list(image_data_list, conn, cursor, block_size_kb=block_size_kb)
                 
                 # Calculate space used by this page
                 page_size_after = sum(f.stat().st_size for f in Path(BASE_DIR).rglob('*') if f.is_file())
@@ -1644,6 +1513,7 @@ def crawl_images(start_offset=0, retry_mode=False):
         logger.info(f"Pages processed: {pages_processed}")
         logger.info(f"Total downloaded: {total_downloaded_bytes / (1024*1024*1024):.2f}GB")
         logger.info(f"Final worker count: {current_workers}")
+        logger.info(f"Block size used: {block_size_kb}KB")
         
         conn.close()
 
@@ -1902,21 +1772,55 @@ def redownload_author_images(author_name):
     
     conn.close()
 
-def get_high_res_url(url):
-    """Try to get the highest resolution version of an image URL."""
-    if '_l.jpg' not in url:
-        return url
-        
-    for res in ['_xxl.jpg', '_xl.jpg']:
-        test_url = url.replace('_l.jpg', res)
-        try:
-            head_response = requests.head(test_url, headers=HEADERS, timeout=5)
-            if head_response.ok:
-                return test_url
-        except:
-            continue
+def get_high_res_url(image_url, session=None):
+    """Get the high resolution version of an image URL if available."""
+    try:
+        if not image_url:
+            return None
             
-    return url
+        if session is None:
+            session = requests.Session()
+            session.headers.update(HEADERS)
+            session.cookies.update(COOKIES)
+        
+        # Extract the base URL and file extension
+        parsed_url = urlparse(image_url)
+        path_parts = parsed_url.path.split('/')
+        if len(path_parts) < 2:
+            return None
+            
+        # Get the original filename
+        original_filename = path_parts[-1]
+        
+        # Try different high-res patterns
+        patterns = [
+            r'(.+?)_o\.(\w+)$',  # Original size
+            r'(.+?)_1280\.(\w+)$',  # 1280px width
+            r'(.+?)_1024\.(\w+)$',  # 1024px width
+            r'(.+?)_800\.(\w+)$',   # 800px width
+        ]
+        
+        for pattern in patterns:
+            match = re.match(pattern, original_filename)
+            if match:
+                base_name, ext = match.groups()
+                # Try to get the original size version
+                high_res_url = f"{parsed_url.scheme}://{parsed_url.netloc}/{'/'.join(path_parts[:-1])}/{base_name}_o.{ext}"
+                
+                try:
+                    # Check if the high-res version exists
+                    response = session.head(high_res_url, timeout=BASE_TIMEOUT)
+                    if response.status_code == 200:
+                        return high_res_url
+                except Exception as e:
+                    logger.warning(f"Error checking high-res URL {high_res_url}: {e}")
+                    continue
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error getting high-res URL for {image_url}: {e}")
+        return None
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Indafoto Crawler')
@@ -1934,13 +1838,15 @@ if __name__ == "__main__":
                        help='Redownload all images from a specific author')
     parser.add_argument('--workers', type=int, default=DEFAULT_WORKERS,
                        help=f'Number of parallel download workers (default: {DEFAULT_WORKERS})')
+    parser.add_argument('--block-size', type=int, default=1024,
+                       help='Block size in KB for downloading images (default: 1024)')
     args = parser.parse_args()
     
     try:
         # Set the number of workers from command line argument
         current_workers = args.workers
         MAX_WORKERS = args.workers
-        logger.info(f"Starting crawler with {current_workers} workers")
+        logger.info(f"Starting crawler with {current_workers} workers and {args.block_size}KB block size")
         
         if args.redownload_author:
             redownload_author_images(args.redownload_author)
@@ -1952,6 +1858,7 @@ if __name__ == "__main__":
             test_camera_extraction()
         else:
             crawl_images(start_offset=args.start_offset, 
-                        retry_mode=args.retry)
+                        retry_mode=args.retry,
+                        block_size_kb=args.block_size)
     except Exception as e:
         logger.critical(f"Unexpected error occurred: {e}", exc_info=True)
