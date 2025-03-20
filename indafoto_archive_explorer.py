@@ -814,7 +814,7 @@ def get_image_note(image_id):
 
 @app.route('/serve_image/<path:image_path>')
 def serve_image(image_path):
-    """Serve image files."""
+    """Serve image files with streaming and caching enabled."""
     try:
         # Get the base path for images (indafoto_archive directory)
         base_path = os.path.abspath(os.path.join(os.getcwd(), 'indafoto_archive'))
@@ -845,7 +845,14 @@ def serve_image(image_path):
             logger.error(f"Image file not found: {full_path}")
             abort(404)
             
-        return send_file(full_path)
+        # Serve the file with streaming and caching enabled
+        return send_file(
+            full_path,
+            mimetype='image/jpeg',
+            conditional=True,  # Enable conditional responses (304 Not Modified)
+            etag=True  # Enable ETag support
+        )
+        
     except Exception as e:
         logger.error(f"Error serving image {image_path}: {e}")
         abort(404)
