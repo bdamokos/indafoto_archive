@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 from tqdm import tqdm
 import argparse
+import niquests as requests
 from indafoto import (
     init_db, get_image_links, process_image_list,
     check_disk_space, estimate_space_requirements,
@@ -49,6 +50,35 @@ class WorkerOptimizer:
         self.results_queue = queue.Queue()
         self.last_tested_page = self.get_next_test_page() - 1  # Initialize to last completed page
         
+        # Initialize session pool
+        self.session_pool = queue.Queue(maxsize=MAX_WORKERS * 2)
+        for _ in range(MAX_WORKERS * 2):
+            session = requests.Session()
+            session.headers.update(HEADERS)
+            session.cookies.update(COOKIES)
+            # Configure session for better performance
+            adapter = requests.adapters.HTTPAdapter(pool_maxsize=5, pool_block=True)
+            session.mount('http://', adapter)
+            session.mount('https://', adapter)
+            self.session_pool.put(session)
+    
+    def get_session(self):
+        """Get a session from the pool."""
+        return self.session_pool.get()
+    
+    def return_session(self, session):
+        """Return a session to the pool."""
+        self.session_pool.put(session)
+    
+    def cleanup_sessions(self):
+        """Clean up all sessions in the pool."""
+        while not self.session_pool.empty():
+            try:
+                session = self.session_pool.get_nowait()
+                session.close()
+            except queue.Empty:
+                break
+    
     def load_optimization_data(self):
         """Load previous optimization results if available."""
         if os.path.exists(OPTIMIZATION_FILE):
@@ -92,43 +122,49 @@ class WorkerOptimizer:
         while True:
             search_page_url = f"https://indafoto.hu/search/list?profile=main&sphinx=1&search=advanced&textsearch=fulltext&textuser=&textmap=&textcompilation=&photo=&datefrom=&dateto=&licence%5B1%5D=I1%3BI2%3BII1%3BII2&licence%5B2%5D=I1%3BI2%3BI3&page_offset={test_page}"
             
-            # Get image data
-            image_data_list = get_image_links(search_page_url)
-            if not image_data_list:
-                logger.error(f"No images found on page {test_page}")
-                test_page += 1
-                continue
-                
-            # Check if we have any new images to process
-            new_images = 0
-            for image_data in image_data_list:
-                try:
-                    url = image_data.get('image_url', '')
-                    if not url:
-                        continue
-                        
-                    # Extract image ID from URL
-                    image_id = extract_image_id(url)
-                    if not image_id:
-                        continue
-                    
-                    # Check if we already have this image
-                    self.cursor.execute("""
-                        SELECT id FROM images 
-                        WHERE url LIKE ?
-                    """, (f"%{image_id}%",))
-                    if not self.cursor.fetchone():
-                        new_images += 1
-                except Exception as e:
-                    logger.error(f"Error checking image: {e}")
+            # Get a session from the pool
+            session = self.get_session()
+            try:
+                # Get image data using the session
+                image_data_list = get_image_links(search_page_url, session=session)
+                if not image_data_list:
+                    logger.error(f"No images found on page {test_page}")
+                    test_page += 1
                     continue
-            
-            if new_images > 0:
-                logger.info(f"Found {new_images} new images on page {test_page}")
-                break
-            else:
-                logger.warning(f"No new images found on page {test_page}, trying next page...")
-                test_page += 1
+                    
+                # Check if we have any new images to process
+                new_images = 0
+                for image_data in image_data_list:
+                    try:
+                        url = image_data.get('image_url', '')
+                        if not url:
+                            continue
+                            
+                        # Extract image ID from URL
+                        image_id = extract_image_id(url)
+                        if not image_id:
+                            continue
+                        
+                        # Check if we already have this image
+                        self.cursor.execute("""
+                            SELECT id FROM images 
+                            WHERE url LIKE ?
+                        """, (f"%{image_id}%",))
+                        if not self.cursor.fetchone():
+                            new_images += 1
+                    except Exception as e:
+                        logger.error(f"Error checking image: {e}")
+                        continue
+                
+                if new_images > 0:
+                    logger.info(f"Found {new_images} new images on page {test_page}")
+                    break
+                else:
+                    logger.warning(f"No new images found on page {test_page}, trying next page...")
+                    test_page += 1
+            finally:
+                # Return the session to the pool
+                self.return_session(session)
         
         # Track metrics
         start_time = time.time()
@@ -353,6 +389,8 @@ class WorkerOptimizer:
             logger.error(f"Error during optimization: {e}")
             return self.initial_workers
         finally:
+            # Clean up sessions
+            self.cleanup_sessions()
             self.conn.close()
 
 def main():
