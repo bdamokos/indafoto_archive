@@ -85,6 +85,27 @@ os.makedirs(BASE_DIR, exist_ok=True)
 banned_authors_set = set()
 current_page = 0  # Track current page number
 
+def create_session(max_retries=3, pool_connections=10):
+    """Create a standardized session with HTTP/2 and multiplexing enabled"""
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    session.cookies.update(COOKIES)
+    
+    # Enable HTTP/2 with multiplexing
+    session.http2 = True
+    session.multiplexed = True
+    
+    # Configure adapter for better performance
+    adapter = requests.adapters.HTTPAdapter(
+        pool_maxsize=pool_connections,
+        pool_block=True,
+        max_retries=max_retries
+    )
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    
+    return session
+
 def init_db():
     """Initialize the database with required tables."""
     conn = sqlite3.connect(DB_FILE)
@@ -317,10 +338,10 @@ def get_image_links(search_page_url, attempt=1, session=None):
         if session:
             response = session.get(search_page_url, timeout=timeout)
         else:
-            response = requests.get(
+            # Create a new session with HTTP/2 support
+            temp_session = create_session(max_retries=attempt)
+            response = temp_session.get(
                 search_page_url,
-                headers=HEADERS,
-                cookies=COOKIES,
                 timeout=timeout,
                 allow_redirects=True
             )
@@ -440,7 +461,9 @@ def extract_metadata(photo_page_url, attempt=1, session=None):
         if session:
             response = session.get(photo_page_url, timeout=timeout)
         else:
-            response = requests.get(photo_page_url, headers=HEADERS, cookies=COOKIES, timeout=timeout)
+            # Create a new session with HTTP/2 support
+            temp_session = create_session(max_retries=attempt)
+            response = temp_session.get(photo_page_url, timeout=timeout)
         if not response.ok:
             logger.error(f"Failed to fetch metadata from {photo_page_url}: HTTP {response.status_code}")
             return None
@@ -755,7 +778,9 @@ def download_image(image_url, author, session=None):
                 if session:
                     response = session.get(image_url, timeout=60, stream=True)
                 else:
-                    response = requests.get(image_url, headers=HEADERS, timeout=60, stream=True)
+                    # Create a new session with HTTP/2 support
+                    temp_session = create_session()
+                    response = temp_session.get(image_url, timeout=60, stream=True)
                 
                 response.raise_for_status()
                 
@@ -822,12 +847,13 @@ class ArchiveSubmitter(threading.Thread):
         self.daemon = True
         self.running = True
         self.archive_queue_file = f"archive_queue_{service_name}.json"
+        self.session = create_session(max_retries=3)
         
     def check_archive_org(self, url):
         """Check if URL is already archived on archive.org."""
         try:
             check_url = f"https://web.archive.org/cdx/search/cdx?url={url}&output=json"
-            response = requests.get(check_url, timeout=60)
+            response = self.session.get(check_url, timeout=60)
             if response.ok:
                 data = response.json()
                 if len(data) > 1:  # First row is header
@@ -845,7 +871,7 @@ class ArchiveSubmitter(threading.Thread):
         """Check if URL is already archived on archive.ph."""
         try:
             timemap_url = f"https://archive.ph/timemap/{url}"
-            response = requests.get(timemap_url, timeout=60)
+            response = self.session.get(timemap_url, timeout=60)
             if response.ok:
                 lines = response.text.strip().split('\n')
                 if len(lines) > 1:
@@ -867,7 +893,7 @@ class ArchiveSubmitter(threading.Thread):
                 return {'success': True, 'archive_url': f"https://web.archive.org/web/*/{url}"}
             
             archive_url = f"https://web.archive.org/save/{url}"
-            response = requests.get(archive_url, timeout=60)
+            response = self.session.get(archive_url, timeout=60)
             return {
                 'success': response.ok,
                 'archive_url': f"https://web.archive.org/web/*/{url}" if response.ok else None
@@ -882,7 +908,7 @@ class ArchiveSubmitter(threading.Thread):
                 return {'success': True, 'archive_url': f"https://archive.ph/{url}"}
             
             data = {'url': url}
-            response = requests.post('https://archive.ph/submit/', data=data, headers=HEADERS, timeout=60)
+            response = self.session.post('https://archive.ph/submit/', data=data, timeout=60)
             
             if response.ok:
                 time.sleep(5)
@@ -1220,17 +1246,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
     # Create session pool with more sessions for better parallelization
     session_pool = queue.Queue(maxsize=current_workers * 4)  # Increased session pool size
     for _ in range(current_workers * 4):
-        session = requests.Session()
-        session.headers.update(HEADERS)
-        session.cookies.update(COOKIES)
-        # Configure session for better performance
-        adapter = requests.adapters.HTTPAdapter(
-            pool_maxsize=current_workers * 2,  # Increased connection pool size
-            pool_block=True,
-            max_retries=3  # Add retries for better reliability
-        )
-        session.mount('http://', adapter)
-        session.mount('https://', adapter)
+        session = create_session(max_retries=3, pool_connections=current_workers * 2)
         session_pool.put(session)
     
     def metadata_worker():
@@ -2098,7 +2114,9 @@ def get_high_res_url(url, session=None):
             if session:
                 response = session.get(test_url, timeout=5, stream=True)
             else:
-                response = requests.get(test_url, headers=HEADERS, timeout=5, stream=True)
+                # Create a new session with HTTP/2 support
+                temp_session = create_session()
+                response = temp_session.get(test_url, timeout=5, stream=True)
             if response.ok:
                 return test_url
         except:
