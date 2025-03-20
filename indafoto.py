@@ -17,6 +17,7 @@ from pathlib import Path
 import portalocker  # Replace fcntl with portalocker
 import json
 import sys
+from PIL import Image
 
 # Configure logging
 logging.basicConfig(
@@ -662,8 +663,8 @@ def extract_metadata(photo_page_url, attempt=1, session=None):
             for pattern in img_patterns:
                 test_url = re.sub(r'_[a-z]+\.jpg$', pattern, base_url)
                 try:
-                    head_response = session.head(test_url, timeout=5)
-                    if head_response.ok:
+                    response = session.get(test_url, timeout=5, stream=True)
+                    if response.ok:
                         high_res_url = test_url
                         break
                 except:
@@ -765,9 +766,6 @@ def download_image(image_url, author, session=None):
                 block_size = BLOCK_SIZE  # Use the global BLOCK_SIZE constant
                 downloaded_size = 0
                 
-                # Calculate hash while downloading
-                sha256_hash = hashlib.sha256()
-                
                 with open(temp_filename, "wb") as file, tqdm(
                     total=total_size,
                     unit='B',
@@ -779,7 +777,6 @@ def download_image(image_url, author, session=None):
                         if not chunk:  # Filter out keep-alive chunks
                             continue
                         file.write(chunk)
-                        sha256_hash.update(chunk)
                         downloaded_size += len(chunk)
                         pbar.update(len(chunk))
                 
@@ -788,26 +785,12 @@ def download_image(image_url, author, session=None):
                     logger.error(f"Download size mismatch for {image_url}. Expected {total_size}, got {downloaded_size}")
                     os.remove(temp_filename)
                     return None, None
-                    
-                # Verify it's a valid JPEG
-                try:
-                    from PIL import Image
-                    with Image.open(temp_filename) as img:
-                        if img.format != 'JPEG':
-                            raise ValueError(f"Downloaded file is not a JPEG (format: {img.format})")
-                        # Force load the image to verify it's not corrupted
-                        img.load()
-                except Exception as e:
-                    logger.error(f"Invalid image file downloaded from {image_url}: {e}")
-                    os.remove(temp_filename)
-                    return None, None
-                    
-                # If all validation passes, move the temp file to final location
+                
+                # Move temp file to final location
                 os.rename(temp_filename, filename)
                 
-                file_hash = sha256_hash.hexdigest()
-                logger.info(f"Successfully downloaded and validated image to {filename} (SHA-256: {file_hash})")
-                return filename, file_hash
+                # Return the filename without validation/hash calculation
+                return filename, None
                 
         finally:
             # Clean up the lock file
@@ -1227,20 +1210,25 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
     skipped_count = 0
     banned_count = 0
     
-    # Initialize queues with larger buffers for parallel processing
-    metadata_queue = queue.Queue(maxsize=36)  # Buffer for pending metadata extractions
-    download_queue = queue.Queue(maxsize=current_workers)      # Buffer for pending downloads
+    # Initialize queues with better buffer sizes for parallel processing
+    metadata_queue = queue.Queue(maxsize=current_workers * 4)  # Increased buffer for metadata
+    download_queue = queue.Queue(maxsize=current_workers * 2)  # Increased buffer for downloads
+    validation_queue = queue.Queue(maxsize=current_workers * 2)  # Queue for validation
     results_queue = queue.Queue()                         # Buffer for completed downloads
     error_queue = queue.Queue()                          # Buffer for errors
     
-    # Create session pool
-    session_pool = queue.Queue(maxsize=current_workers * 2)
-    for _ in range(current_workers * 2):
+    # Create session pool with more sessions for better parallelization
+    session_pool = queue.Queue(maxsize=current_workers * 4)  # Increased session pool size
+    for _ in range(current_workers * 4):
         session = requests.Session()
         session.headers.update(HEADERS)
         session.cookies.update(COOKIES)
         # Configure session for better performance
-        adapter = requests.adapters.HTTPAdapter(pool_maxsize=5, pool_block=True)
+        adapter = requests.adapters.HTTPAdapter(
+            pool_maxsize=current_workers * 2,  # Increased connection pool size
+            pool_block=True,
+            max_retries=3  # Add retries for better reliability
+        )
         session.mount('http://', adapter)
         session.mount('https://', adapter)
         session_pool.put(session)
@@ -1300,8 +1288,8 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 try:
                     result = download_image(url, metadata['author'], session=session)
                     if result:
-                        local_path, file_hash = result
-                        results_queue.put((local_path, file_hash, url, metadata))
+                        filename, _ = result
+                        validation_queue.put((filename, url, metadata))
                     else:
                         error_queue.put(('download', url, "Failed to download image"))
                 except Exception as e:
@@ -1313,6 +1301,51 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 download_queue.task_done()
             except Exception as e:
                 logger.error(f"Error in download worker: {e}")
+                continue
+    
+    def validation_worker(progress_bar):
+        """Worker function for validating downloaded images and calculating hashes."""
+        while True:
+            try:
+                item = validation_queue.get()
+                if item is None:  # Poison pill
+                    validation_queue.task_done()
+                    break
+                
+                filename, url, metadata = item
+                
+                try:
+                    # Verify it's a valid JPEG
+                    with Image.open(filename) as img:
+                        if img.format != 'JPEG':
+                            raise ValueError(f"Downloaded file is not a JPEG (format: {img.format})")
+                        # Force load the image to verify it's not corrupted
+                        img.load()
+                    
+                    # Calculate hash
+                    file_hash = calculate_file_hash(filename)
+                    
+                    # Put result in results queue
+                    results_queue.put((filename, file_hash, url, metadata))
+                    
+                    # Update progress bar with author info
+                    progress_bar.set_description(f"Validating {metadata['author']}")
+                    progress_bar.update(1)
+                    
+                except Exception as e:
+                    error_queue.put(('validation', url, str(e)))
+                    # Clean up invalid file
+                    try:
+                        if os.path.exists(filename):
+                            os.remove(filename)
+                    except:
+                        pass
+                    # Update progress bar even for failures
+                    progress_bar.update(1)
+                
+                validation_queue.task_done()
+            except Exception as e:
+                logger.error(f"Error in validation worker: {e}")
                 continue
     
     try:
@@ -1361,9 +1394,9 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
         
         logger.info(f"Found {len(image_ids_to_process)} new images to process")
         
-        # Start metadata workers
+        # Start metadata workers - now equal to download workers
         metadata_threads = []
-        for _ in range(36):
+        for _ in range(current_workers):
             t = threading.Thread(target=metadata_worker)
             t.daemon = True
             t.start()
@@ -1377,9 +1410,23 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
             t.start()
             download_threads.append(t)
         
-        # Feed metadata queue
-        for image_data in image_ids_to_process:
-            metadata_queue.put(image_data)
+        # Start validation workers
+        validation_threads = []
+        validation_progress = tqdm(total=len(image_ids_to_process), desc="Validating images", position=2, colour='yellow')
+        for _ in range(current_workers):
+            t = threading.Thread(target=validation_worker, args=(validation_progress,))
+            t.daemon = True
+            t.start()
+            validation_threads.append(t)
+        
+        # Feed metadata queue in batches to prevent overwhelming
+        batch_size = current_workers * 2
+        for i in range(0, len(image_ids_to_process), batch_size):
+            batch = image_ids_to_process[i:i + batch_size]
+            for image_data in batch:
+                metadata_queue.put(image_data)
+            # Wait for the batch to be processed before adding more
+            metadata_queue.join()
         
         # Add poison pills for metadata workers
         for _ in range(len(metadata_threads)):
@@ -1394,6 +1441,16 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
         
         # Wait for download queue to be processed
         download_queue.join()
+        
+        # Add poison pills for validation workers
+        for _ in range(len(validation_threads)):
+            validation_queue.put(None)
+        
+        # Wait for validation queue to be processed
+        validation_queue.join()
+        
+        # Close the progress bar
+        validation_progress.close()
         
         # Process results and errors
         downloaded_images = []
@@ -2034,14 +2091,15 @@ def get_high_res_url(url, session=None):
     if '_l.jpg' not in url:
         return url
         
+    # Try higher resolution versions in order
     for res in ['_xxl.jpg', '_xl.jpg']:
         test_url = url.replace('_l.jpg', res)
         try:
             if session:
-                head_response = session.head(test_url, timeout=5)
+                response = session.get(test_url, timeout=5, stream=True)
             else:
-                head_response = requests.head(test_url, headers=HEADERS, timeout=5)
-            if head_response.ok:
+                response = requests.get(test_url, headers=HEADERS, timeout=5, stream=True)
+            if response.ok:
                 return test_url
         except:
             continue
