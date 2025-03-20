@@ -32,12 +32,14 @@ class ArchiveSubmitter:
     def __init__(self):
         self.conn = sqlite3.connect(DB_FILE)
         self.cursor = self.conn.cursor()
+        self.session = requests.Session()
+        self.session.headers.update(HEADERS)
         
     def check_archive_org(self, url):
         """Check if URL is already archived on archive.org using CDX API."""
         try:
             check_url = f"https://web.archive.org/cdx/search/cdx?url={quote_plus(url)}&output=json"
-            response = requests.get(check_url, timeout=60)
+            response = self.session.get(check_url, timeout=60)
             if response.ok:
                 data = response.json()
                 if len(data) > 1:  # First row is header
@@ -56,7 +58,7 @@ class ArchiveSubmitter:
         """Check if URL is already archived on archive.ph using Memento TimeMap."""
         try:
             timemap_url = f"https://archive.ph/timemap/{url}"
-            response = requests.get(timemap_url, timeout=60)
+            response = self.session.get(timemap_url, timeout=60)
             if response.ok:
                 lines = response.text.strip().split('\n')
                 if len(lines) > 1:
@@ -76,7 +78,7 @@ class ArchiveSubmitter:
         """Submit URL to archive.org."""
         try:
             archive_url = f"https://web.archive.org/save/{url}"
-            response = requests.get(archive_url, headers=HEADERS, timeout=60)
+            response = self.session.get(archive_url, timeout=60)
             return response.ok
         except Exception as e:
             logger.error(f"Failed to submit to archive.org: {url} - {e}")
@@ -86,9 +88,8 @@ class ArchiveSubmitter:
         """Submit URL to archive.ph."""
         try:
             data = {'url': url}
-            response = requests.post('https://archive.ph/submit/', 
+            response = self.session.post('https://archive.ph/submit/', 
                                   data=data, 
-                                  headers=HEADERS, 
                                   timeout=60)
             return response.ok
         except Exception as e:
