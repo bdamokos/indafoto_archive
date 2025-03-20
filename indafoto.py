@@ -16,6 +16,7 @@ import shutil
 from pathlib import Path
 import portalocker  # Replace fcntl with portalocker
 import json
+import sys
 
 # Configure logging
 logging.basicConfig(
@@ -79,12 +80,15 @@ COOKIES = {
 # Ensure base directory exists
 os.makedirs(BASE_DIR, exist_ok=True)
 
-# Initialize database
+# Add at the top with other global variables
+banned_authors_set = set()
+
 def init_db():
+    """Initialize the database with required tables."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
-    # Create images table with UUID and hash
+    # Create tables if they don't exist
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS images (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,6 +140,22 @@ def init_db():
         cursor.execute("ALTER TABLE images ADD COLUMN upload_date TEXT")
     except sqlite3.OperationalError:
         pass  # Column already exists
+    
+    # Create banned_authors table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS banned_authors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        author TEXT UNIQUE,
+        reason TEXT,
+        banned_date TEXT,
+        banned_by TEXT
+    )
+    """)
+    
+    # Load banned authors into memory
+    cursor.execute("SELECT author FROM banned_authors")
+    global banned_authors_set
+    banned_authors_set = {row[0] for row in cursor.fetchall()}
     
     # Create collections table
     cursor.execute("""
@@ -1132,14 +1152,76 @@ def retry_failed_pages(conn, cursor):
             """, (datetime.now().isoformat(), str(e), page_number))
             conn.commit()
 
+def is_author_banned(author):
+    """Check if an author is banned using the in-memory set."""
+    return author in banned_authors_set
+
+def ban_author(conn, author, reason, banned_by="system"):
+    """Add an author to the banned list."""
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO banned_authors (author, reason, banned_date, banned_by)
+            VALUES (?, ?, ?, ?)
+        """, (author, reason, datetime.now().isoformat(), banned_by))
+        conn.commit()
+        global banned_authors_set
+        banned_authors_set.add(author)
+        return True
+    except sqlite3.IntegrityError:
+        return False  # Author is already banned
+
+def unban_author(conn, author):
+    """Remove an author from the banned list."""
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM banned_authors WHERE author = ?", (author,))
+    conn.commit()
+    if cursor.rowcount > 0:
+        global banned_authors_set
+        banned_authors_set.discard(author)
+        return True
+    return False
+
+def get_banned_authors(conn):
+    """Get list of banned authors."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM banned_authors ORDER BY banned_date DESC")
+    return cursor.fetchall()
+
+def cleanup_banned_author_content(conn, author):
+    """Delete all content associated with a banned author."""
+    cursor = conn.cursor()
+    
+    # Get all image IDs for this author
+    cursor.execute("SELECT id FROM images WHERE author = ?", (author,))
+    image_ids = [row[0] for row in cursor.fetchall()]
+    
+    if not image_ids:
+        return True
+    
+    # Delete from all related tables
+    for image_id in image_ids:
+        cursor.execute("DELETE FROM image_tags WHERE image_id = ?", (image_id,))
+        cursor.execute("DELETE FROM image_albums WHERE image_id = ?", (image_id,))
+        cursor.execute("DELETE FROM image_collections WHERE image_id = ?", (image_id,))
+        cursor.execute("DELETE FROM marked_images WHERE image_id = ?", (image_id,))
+        cursor.execute("DELETE FROM image_notes WHERE image_id = ?", (image_id,))
+    
+    # Delete the images
+    cursor.execute("DELETE FROM images WHERE author = ?", (author,))
+    
+    conn.commit()
+    return True
+
 def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
-    """Process a list of images using a pipeline pattern for metadata extraction and downloading."""
+    """Process a list of images and save them to the database."""
     global consecutive_failures, consecutive_successes, current_wait_time, current_workers
     
     author_image_counts = {}
     processed_count = 0
     failed_count = 0
     skipped_count = 0
+    banned_count = 0
     
     # Initialize queues
     metadata_queue = queue.Queue(maxsize=current_workers * 2)  # Buffer for pending metadata extractions
@@ -1174,6 +1256,12 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 try:
                     metadata = extract_metadata(image_data['page_url'], session=session)
                     if metadata:
+                        # Skip banned authors
+                        if is_author_banned(metadata['author']):
+                            banned_count[0] += 1
+                            metadata_queue.task_done()
+                            continue
+                        
                         # Try to get high-res version URL
                         url = image_data['image_url']
                         high_res_url = get_high_res_url(url, session=session)
@@ -1461,6 +1549,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
             'processed_count': processed_count,
             'failed_count': failed_count,
             'skipped_count': skipped_count,
+            'banned_count': banned_count,
             'total_images': total_images,
             'author_counts': author_image_counts,
             'current_workers': current_workers,
@@ -1970,6 +2059,14 @@ if __name__ == "__main__":
                        help='Redownload all images from a specific author')
     parser.add_argument('--workers', type=int, default=DEFAULT_WORKERS,
                        help=f'Number of parallel download workers (default: {DEFAULT_WORKERS})')
+    parser.add_argument('--ban-author',
+                       help='Add an author to the banned list')
+    parser.add_argument('--ban-reason',
+                       help='Reason for banning an author')
+    parser.add_argument('--unban-author',
+                       help='Remove an author from the banned list')
+    parser.add_argument('--cleanup-banned',
+                       help='Clean up all content from a banned author')
     args = parser.parse_args()
     
     try:
@@ -1978,7 +2075,27 @@ if __name__ == "__main__":
         MAX_WORKERS = args.workers
         logger.info(f"Starting crawler with {current_workers} workers")
         
-        if args.redownload_author:
+        conn = init_db()
+        
+        if args.ban_author:
+            if not args.ban_reason:
+                print("Error: --ban-reason is required when banning an author")
+                sys.exit(1)
+            if ban_author(conn, args.ban_author, args.ban_reason):
+                print(f"Successfully banned author: {args.ban_author}")
+            else:
+                print(f"Failed to ban author: {args.ban_author}")
+        elif args.unban_author:
+            if unban_author(conn, args.unban_author):
+                print(f"Successfully unbanned author: {args.unban_author}")
+            else:
+                print(f"Failed to unban author: {args.unban_author}")
+        elif args.cleanup_banned:
+            if cleanup_banned_author_content(conn, args.cleanup_banned):
+                print(f"Successfully cleaned up content for banned author: {args.cleanup_banned}")
+            else:
+                print(f"Failed to clean up content for banned author: {args.cleanup_banned}")
+        elif args.redownload_author:
             redownload_author_images(args.redownload_author)
         elif args.test:
             test_album_extraction()
@@ -1991,3 +2108,6 @@ if __name__ == "__main__":
                         retry_mode=args.retry)
     except Exception as e:
         logger.critical(f"Unexpected error occurred: {e}", exc_info=True)
+    finally:
+        if 'conn' in locals():
+            conn.close()
