@@ -5,7 +5,7 @@ import time
 import logging
 from tqdm import tqdm
 from bs4 import BeautifulSoup
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, parse_qs
 import re
 from datetime import datetime
 import threading
@@ -82,6 +82,7 @@ os.makedirs(BASE_DIR, exist_ok=True)
 
 # Add at the top with other global variables
 banned_authors_set = set()
+current_page = 0  # Track current page number
 
 def init_db():
     """Initialize the database with required tables."""
@@ -307,18 +308,21 @@ def get_image_directory(author):
     
     return subdir
 
-def get_image_links(search_page_url, attempt=1):
+def get_image_links(search_page_url, attempt=1, session=None):
     """Extract image links from a search result page."""
     try:
         logger.info(f"Attempting to fetch URL: {search_page_url} (attempt {attempt})")
         timeout = BASE_TIMEOUT * attempt  # Progressive timeout
-        response = requests.get(
-            search_page_url,
-            headers=HEADERS,
-            cookies=COOKIES,
-            timeout=timeout,
-            allow_redirects=True
-        )
+        if session:
+            response = session.get(search_page_url, timeout=timeout)
+        else:
+            response = requests.get(
+                search_page_url,
+                headers=HEADERS,
+                cookies=COOKIES,
+                timeout=timeout,
+                allow_redirects=True
+            )
         
         # Log response details
         logger.info(f"Response status code: {response.status_code}")
@@ -1223,8 +1227,8 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
     skipped_count = 0
     banned_count = 0
     
-    # Initialize queues
-    metadata_queue = queue.Queue(maxsize=current_workers * 2)  # Buffer for pending metadata extractions
+    # Initialize queues with larger buffers for parallel processing
+    metadata_queue = queue.Queue(maxsize=36)  # Buffer for pending metadata extractions
     download_queue = queue.Queue(maxsize=current_workers)      # Buffer for pending downloads
     results_queue = queue.Queue()                         # Buffer for completed downloads
     error_queue = queue.Queue()                          # Buffer for errors
@@ -1359,7 +1363,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
         
         # Start metadata workers
         metadata_threads = []
-        for _ in range(current_workers):
+        for _ in range(36):
             t = threading.Thread(target=metadata_worker)
             t.daemon = True
             t.start()
@@ -1378,14 +1382,14 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
             metadata_queue.put(image_data)
         
         # Add poison pills for metadata workers
-        for _ in range(current_workers):
+        for _ in range(len(metadata_threads)):
             metadata_queue.put(None)
         
         # Wait for metadata queue to be processed
         metadata_queue.join()
         
         # Add poison pills for download workers
-        for _ in range(current_workers):
+        for _ in range(len(download_threads)):
             download_queue.put(None)
         
         # Wait for download queue to be processed
@@ -1490,6 +1494,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 author = metadata.get('author', 'unknown')
                 author_image_counts[author] = author_image_counts.get(author, 0) + 1
                 
+                # Commit after each successful image save
                 conn.commit()
                 
             except Exception as e:
@@ -2042,6 +2047,8 @@ def get_high_res_url(url, session=None):
             continue
             
     return url
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Indafoto Crawler')
