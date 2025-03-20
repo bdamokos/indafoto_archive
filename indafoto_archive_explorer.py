@@ -1342,7 +1342,7 @@ def create_app():
     init_db()
     
     # Start archive submitter
-    start_archive_submitter()
+    # start_archive_submitter()
     
     # Add template context processors
     @app.context_processor
