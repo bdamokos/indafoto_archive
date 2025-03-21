@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-import os
 import sqlite3
 import time
 import logging
 import niquests as requests
 import re
-from datetime import datetime, timedelta
-import random
+from datetime import datetime
 from urllib.parse import quote_plus
 
 # Configure logging

@@ -5,7 +5,7 @@ import time
 import logging
 from tqdm import tqdm
 from bs4 import BeautifulSoup
-from urllib.parse import unquote, urlparse, parse_qs
+from urllib.parse import unquote, urlparse
 import re
 from datetime import datetime
 import threading
@@ -14,10 +14,9 @@ import argparse
 import hashlib
 import shutil
 from pathlib import Path
-import portalocker  # Replace fcntl with portalocker
+import portalocker
 import json
 import sys
-from PIL import Image
 import subprocess
 import signal
 import atexit
