@@ -5,9 +5,9 @@ services:
     build: .
     command: python indafoto.py
     volumes:
-      - ${DATA_PATH:-/mnt/usb/indafoto}/indafoto.db:/app/indafoto.db
-      - ${DATA_PATH:-/mnt/usb/indafoto}/indafoto_archive:/app/indafoto_archive
-      - ${DATA_PATH:-/mnt/usb/indafoto}/logs:/app/logs
+      - ${DATA_PATH:-/mnt/usb/indafoto_archive}/indafoto.db:/app/indafoto.db
+      - ${DATA_PATH:-/mnt/usb/indafoto_archive}/indafoto_archive:/app/indafoto_archive
+      - ${DATA_PATH:-/mnt/usb/indafoto_archive}/logs:/app/logs
     environment:
       - DB_PATH=/app/indafoto.db
       - ARCHIVE_PATH=/app/indafoto_archive
@@ -17,9 +17,9 @@ services:
     build: .
     command: python archive_submitter.py
     volumes:
-      - ${DATA_PATH:-/mnt/usb/indafoto}/indafoto.db:/app/indafoto.db
-      - ${DATA_PATH:-/mnt/usb/indafoto}/indafoto_archive:/app/indafoto_archive
-      - ${DATA_PATH:-/mnt/usb/indafoto}/logs:/app/logs
+      - ${DATA_PATH:-/mnt/usb/indafoto_archive}/indafoto.db:/app/indafoto.db
+      - ${DATA_PATH:-/mnt/usb/indafoto_archive}/indafoto_archive:/app/indafoto_archive
+      - ${DATA_PATH:-/mnt/usb/indafoto_archive}/logs:/app/logs
     environment:
       - DB_PATH=/app/indafoto.db
       - ARCHIVE_PATH=/app/indafoto_archive
@@ -31,9 +31,9 @@ services:
     ports:
       - "5031:5001"
     volumes:
-      - ${DATA_PATH:-/mnt/usb/indafoto}/indafoto.db:/app/indafoto.db
-      - ${DATA_PATH:-/mnt/usb/indafoto}/indafoto_archive:/app/indafoto_archive
-      - ${DATA_PATH:-/mnt/usb/indafoto}/logs:/app/logs
+      - ${DATA_PATH:-/mnt/usb/indafoto_archive}/indafoto.db:/app/indafoto.db
+      - ${DATA_PATH:-/mnt/usb/indafoto_archive}/indafoto_archive:/app/indafoto_archive
+      - ${DATA_PATH:-/mnt/usb/indafoto_archive}/logs:/app/logs
     environment:
       - DB_PATH=/app/indafoto.db
       - ARCHIVE_PATH=/app/indafoto_archive
