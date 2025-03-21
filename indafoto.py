@@ -190,6 +190,15 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
+    # Set performance optimizing PRAGMAs
+    cursor.execute("PRAGMA journal_mode=WAL")  # Use Write-Ahead Logging for better concurrency
+    cursor.execute("PRAGMA synchronous=NORMAL")  # Reduce fsync calls while maintaining safety
+    cursor.execute("PRAGMA cache_size=-1000000")  # Use 1GB of memory for cache (-ve number means kilobytes)
+    cursor.execute("PRAGMA temp_store=MEMORY")  # Store temp tables and indices in memory
+    cursor.execute("PRAGMA mmap_size=8589934592")  # Allow up to 8GB memory-mapped I/O (8 * 1024 * 1024 * 1024)
+    cursor.execute("PRAGMA page_size=4096")  # Optimal page size for most systems
+    cursor.execute("PRAGMA busy_timeout=60000")  # Wait up to 60 seconds for locks
+    
     # Create tables if they don't exist
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS images (
