@@ -1496,7 +1496,16 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                         elif status == 'error':
                             error_type, url, error_msg = data
                             if error_type == 'download':
-                                record_failed_download(url, metadata['page_url'], metadata['author'], f"Download error: {error_msg}")
+                                # Get metadata from the metadata result
+                                metadata = None
+                                for result in metadata_pool.results.queue:
+                                    if result[1][0] == url:  # Check if this result has our URL
+                                        metadata = result[1][1]  # Get metadata from metadata result
+                                        break
+                                if metadata:
+                                    record_failed_download(url, metadata['page_url'], metadata['author'], f"Download error: {error_msg}")
+                                else:
+                                    record_failed_download(url, None, None, f"Download error: {error_msg}")
                             failed_count += 1
                             pbar.update(1)
                         
@@ -1553,7 +1562,16 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                         elif status == 'error':
                             error_type, url, error_msg = data
                             if error_type == 'validation':
-                                record_failed_download(url, metadata['page_url'], metadata['author'], f"Validation error: {error_msg}")
+                                # Get metadata from the download result
+                                metadata = None
+                                for result in download_pool.results.queue:
+                                    if result[1][1] == url:  # Check if this result has our URL
+                                        metadata = result[1][2]  # Get metadata from download result
+                                        break
+                                if metadata:
+                                    record_failed_download(url, metadata['page_url'], metadata['author'], f"Validation error: {error_msg}")
+                                else:
+                                    record_failed_download(url, None, None, f"Validation error: {error_msg}")
                             failed_count += 1
                         
                         pbar.update(1)
