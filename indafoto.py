@@ -706,23 +706,15 @@ def extract_metadata(photo_page_url, attempt=1, session=None):
         og_image = soup.find("meta", property="og:image")
         if og_image and og_image.get("content"):
             base_url = og_image["content"]
-            # Replace the resolution suffix to get higher resolution
-            for pattern in img_patterns:
-                test_url = re.sub(r'_[a-z]+\.jpg$', pattern, base_url)
-                try:
-                    response = session.get(test_url, timeout=5, stream=True)
-                    if response.ok:
-                        high_res_url = test_url
-                        break
-                except:
-                    continue
+            # Use our optimized function to get the highest resolution version
+            high_res_url = get_high_res_url(base_url, session=session)
         
         # Fallback to looking for direct links if meta tag approach failed
         if not high_res_url:
             for pattern in img_patterns:
                 img_link = soup.find('a', href=lambda x: x and pattern in x)
                 if img_link:
-                    high_res_url = img_link['href']
+                    high_res_url = get_high_res_url(img_link['href'], session=session)
                     break
 
         metadata = {
@@ -1907,18 +1899,8 @@ def redownload_author_images(author_name):
                 failed += 1
                 continue
             
-            # Try to get high-res version of the image
-            download_url = url
-            if '_l.jpg' in url:
-                for res in ['_xxl.jpg', '_xl.jpg']:
-                    test_url = url.replace('_l.jpg', res)
-                    try:
-                        head_response = requests.head(test_url, headers=HEADERS, timeout=5)
-                        if head_response.ok:
-                            download_url = test_url
-                            break
-                    except:
-                        continue
+            # Try to get high-res version of the image using our optimized function
+            download_url = get_high_res_url(url)
             
             # Download the image
             new_path, new_hash = download_image(download_url, author_name)
