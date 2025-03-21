@@ -2171,16 +2171,31 @@ def get_high_res_url(url, session=None):
         test_url = url.replace('_l.jpg', res)
         try:
             if session:
-                response = session.get(test_url, timeout=5, stream=True)
+                # Use a shorter timeout for high-res checks
+                response = session.get(test_url, timeout=3, stream=True)
             else:
-                # Create a new session with HTTP/2 support
+                # Create a new session with HTTP/2 support and shorter timeout
                 temp_session = create_session()
-                response = temp_session.get(test_url, timeout=5, stream=True)
-            if response.ok:
-                return test_url
-        except:
-            continue
+                response = temp_session.get(test_url, timeout=3, stream=True)
             
+            if response.ok:
+                # Close the response to prevent connection reuse issues
+                response.close()
+                return test_url
+                
+        except (requests.exceptions.Timeout, 
+                requests.exceptions.ConnectionError,
+                OSError) as e:
+            logger.debug(f"Failed to check {test_url}: {str(e)}")
+            continue
+        finally:
+            # Ensure response is closed in all cases
+            if 'response' in locals():
+                try:
+                    response.close()
+                except:
+                    pass
+                
     return url
 
 
