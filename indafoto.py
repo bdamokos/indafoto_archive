@@ -1459,8 +1459,8 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
         validation_progress = tqdm(total=len(image_ids_to_process), desc="Validating images", position=2, colour='yellow')
         
         try:
-            # Start metadata workers - now equal to download workers
-            for _ in range(current_workers):
+            # Start metadata workers
+            for _ in range(max(current_workers*4, 36)):
                 t = threading.Thread(target=metadata_worker)
                 t.daemon = True
                 t.start()
