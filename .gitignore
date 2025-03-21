@@ -13,3 +13,4 @@ worker_optimization.log
 worker_optimization.json
 __pycache__/
 sync.sh
+redownload_missing.log
