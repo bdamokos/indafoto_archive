@@ -18,6 +18,9 @@ import portalocker  # Replace fcntl with portalocker
 import json
 import sys
 from PIL import Image
+import subprocess
+import signal
+import atexit
 
 # Configure logging
 logging.basicConfig(
@@ -29,6 +32,83 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Add restart configuration
+RESTART_INTERVAL = 7200  # 2 hours in seconds
+last_restart_time = time.time()
+restart_timer = None
+should_restart = False
+
+def restart_script():
+    """Restart the script while preserving the current state."""
+    global should_restart
+    should_restart = True
+    logger.info("Initiating script restart...")
+    
+    # Get the current page number from the database
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT MAX(page_number) 
+            FROM completed_pages
+        """)
+        last_page = cursor.fetchone()[0]
+        next_page = (last_page + 1) if last_page is not None else 0
+        logger.info(f"Restarting from page {next_page}")
+    except Exception as e:
+        logger.error(f"Error getting last page: {e}")
+        next_page = 0
+    finally:
+        conn.close()
+    
+    # Prepare the command with the same arguments
+    cmd = [sys.executable] + sys.argv
+    # Update or add the start-offset argument
+    start_offset_found = False
+    for i, arg in enumerate(cmd):
+        if arg == '--start-offset':
+            cmd[i + 1] = str(next_page)
+            start_offset_found = True
+            break
+    if not start_offset_found:
+        cmd.extend(['--start-offset', str(next_page)])
+    
+    # Start the new process
+    try:
+        subprocess.Popen(cmd)
+        logger.info("New process started successfully")
+    except Exception as e:
+        logger.error(f"Failed to start new process: {e}")
+    
+    # Exit the current process
+    sys.exit(0)
+
+def check_restart_timer():
+    """Check if it's time to restart the script."""
+    global last_restart_time, restart_timer
+    current_time = time.time()
+    if current_time - last_restart_time >= RESTART_INTERVAL:
+        logger.info("Restart interval reached, initiating restart...")
+        restart_script()
+    else:
+        # Schedule next check
+        restart_timer = threading.Timer(60, check_restart_timer)
+        restart_timer.start()
+
+def signal_handler(signum, frame):
+    """Handle termination signals gracefully."""
+    logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+    if restart_timer:
+        restart_timer.cancel()
+    sys.exit(0)
+
+# Register signal handlers
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
+# Register cleanup function
+atexit.register(lambda: restart_timer.cancel() if restart_timer else None)
 
 # Configurations
 # If you want to save images with different characteristics, you can change the search URL template and the total number of pages.
@@ -1594,7 +1674,12 @@ def estimate_space_requirements(downloaded_bytes, pages_processed, total_pages):
 
 def crawl_images(start_offset=0, retry_mode=False):
     """Main function to crawl images and save metadata."""
-    global current_workers, consecutive_failures, consecutive_successes, current_wait_time
+    global current_workers, consecutive_failures, consecutive_successes, current_wait_time, last_restart_time
+    
+    # Start the restart timer
+    global restart_timer
+    restart_timer = threading.Timer(60, check_restart_timer)
+    restart_timer.start()
     
     conn = init_db()
     cursor = conn.cursor()
@@ -1631,6 +1716,11 @@ def crawl_images(start_offset=0, retry_mode=False):
                     logger.info(f"Added page {page_number} to retry queue due to 0 images")
         
         for page in tqdm(range(start_offset, TOTAL_PAGES), desc="Crawling pages", colour='blue'):
+            # Check if we should restart
+            if should_restart:
+                logger.info("Restart flag set, initiating restart...")
+                restart_script()
+            
             try:
                 # Check if page was already completed successfully
                 cursor.execute("""
