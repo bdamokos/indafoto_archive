@@ -2166,27 +2166,47 @@ def get_high_res_url(url, session=None):
     if '_l.jpg' not in url:
         return url
         
+    # Only request a tiny amount of data to verify existence (1024 bytes)
+    headers = {'Range': 'bytes=0-1023'}
+    # Very short timeout - fail fast
+    timeout = 1.5
+    
     # Try higher resolution versions in order
     for res in ['_xxl.jpg', '_xl.jpg']:
         test_url = url.replace('_l.jpg', res)
         try:
             if session:
-                # Use a shorter timeout for high-res checks
-                response = session.get(test_url, timeout=3, stream=True)
+                response = session.get(
+                    test_url, 
+                    headers=headers,
+                    timeout=timeout, 
+                    stream=True
+                )
             else:
-                # Create a new session with HTTP/2 support and shorter timeout
                 temp_session = create_session()
-                response = temp_session.get(test_url, timeout=3, stream=True)
+                response = temp_session.get(
+                    test_url, 
+                    headers=headers,
+                    timeout=timeout, 
+                    stream=True
+                )
             
-            if response.ok:
-                # Close the response to prevent connection reuse issues
-                response.close()
-                return test_url
+            # If the response is successful (200 OK or 206 Partial Content)
+            if response.status_code in [200, 206]:
+                # Read just a tiny bit to verify the content exists
+                for chunk in response.iter_content(chunk_size=256):
+                    if chunk:  # Filter out keep-alive new chunks
+                        response.close()
+                        return test_url
+                    break  # Only need the first chunk
+                
+            # Not found, close the response
+            response.close()
                 
         except (requests.exceptions.Timeout, 
                 requests.exceptions.ConnectionError,
                 OSError) as e:
-            logger.debug(f"Failed to check {test_url}: {str(e)}")
+            # Silent failure - just continue to next resolution
             continue
         finally:
             # Ensure response is closed in all cases
@@ -2196,6 +2216,7 @@ def get_high_res_url(url, session=None):
                 except:
                     pass
                 
+    # If we can't find higher res versions, return the original
     return url
 
 
