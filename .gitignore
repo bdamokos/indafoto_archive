@@ -14,3 +14,5 @@ worker_optimization.json
 __pycache__/
 sync.sh
 redownload_missing.log
+indafoto.db-wal
+indafoto.db-shm
