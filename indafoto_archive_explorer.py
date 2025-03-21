@@ -1344,7 +1344,17 @@ def browse_authors():
 def banned_authors():
     """Display the banned authors management page."""
     conn = indafoto_init_db()  # Use the init_db from indafoto.py
-    banned_authors = get_banned_authors(conn)
+    cursor_results = get_banned_authors(conn)
+    # Convert cursor results to list of dictionaries
+    banned_authors = [
+        {
+            'author': row[1],  # author column
+            'reason': row[2],  # reason column
+            'banned_date': row[3],  # banned_date column
+            'banned_by': row[4]  # banned_by column
+        }
+        for row in cursor_results
+    ]
     conn.close()
     return render_template('banned_authors.html', banned_authors=banned_authors)
 
