@@ -33,7 +33,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Add restart configuration
-RESTART_INTERVAL = 7200  # 2 hours in seconds
+RESTART_INTERVAL = 3600*24 # 24 hours in seconds
 last_restart_time = time.time()
 restart_timer = None
 should_restart = False
