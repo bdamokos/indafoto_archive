@@ -1410,103 +1410,6 @@ def cleanup_author_content(author):
     finally:
         conn.close()
 
-@app.route('/failed_downloads')
-def failed_downloads():
-    """View failed downloads with their status and archive information."""
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    # Get current page from query parameters
-    page = request.args.get('page', 1, type=int)
-    status = request.args.get('status', 'all')
-    items_per_page = ITEMS_PER_PAGE
-    
-    # Build query based on status filter
-    query = """
-        SELECT fd.*, 
-               a.archive_url, a.status as archive_status, a.submission_date as archive_date
-        FROM failed_downloads fd
-        LEFT JOIN archive_submissions a ON fd.page_url = a.url
-    """
-    params = []
-    
-    if status != 'all':
-        query += " WHERE fd.status = ?"
-        params.append(status)
-    
-    # Get total count
-    count_query = f"SELECT COUNT(*) FROM ({query}) as subquery"
-    cursor.execute(count_query, params)
-    total_items = cursor.fetchone()[0]
-    total_pages = math.ceil(total_items / items_per_page)
-    
-    # Add pagination
-    query += " ORDER BY fd.last_attempt DESC LIMIT ? OFFSET ?"
-    params.extend([items_per_page, (page - 1) * items_per_page])
-    
-    cursor.execute(query, params)
-    failed_items = cursor.fetchall()
-    
-    # Get statistics
-    cursor.execute("""
-        SELECT 
-            COUNT(*) as total,
-            SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
-            SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
-            SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) as resolved
-        FROM failed_downloads
-    """)
-    stats = cursor.fetchone()
-    
-    conn.close()
-    
-    return render_template('failed_downloads.html',
-                         items=failed_items,
-                         stats=stats,
-                         page=page,
-                         total_pages=total_pages,
-                         current_status=status)
-
-@app.route('/api/failed_downloads/<int:id>/resolve', methods=['POST'])
-def resolve_failed_download(id):
-    """Mark a failed download as resolved."""
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    try:
-        cursor.execute("""
-            UPDATE failed_downloads
-            SET status = 'resolved'
-            WHERE id = ?
-        """, (id,))
-        conn.commit()
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    finally:
-        conn.close()
-
-@app.route('/api/failed_downloads/<int:id>/retry', methods=['POST'])
-def retry_failed_download(id):
-    """Reset a failed download to pending status for retry."""
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    try:
-        cursor.execute("""
-            UPDATE failed_downloads
-            SET status = 'pending',
-                attempts = 0,
-                last_attempt = NULL
-            WHERE id = ?
-        """, (id,))
-        conn.commit()
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    finally:
-        conn.close()
-
 @app.context_processor
 def inject_nav_items():
     return {
@@ -1515,7 +1418,6 @@ def inject_nav_items():
             {'url': '/images', 'text': 'Browse Images'},
             {'url': '/authors', 'text': 'Browse Authors'},
             {'url': '/marked', 'text': 'Marked Images'},
-            {'url': '/failed_downloads', 'text': 'Failed Downloads'},
             {'url': '/banned_authors', 'text': 'Banned Authors'}
         ]
     }
