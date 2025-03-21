@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container mt-4">
+    <h1>Failed Downloads</h1>
+    
+    <!-- Statistics -->
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Total</h5>
+                    <p class="card-text display-4">{{ stats.total }}</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Pending</h5>
+                    <p class="card-text display-4">{{ stats.pending }}</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Failed</h5>
+                    <p class="card-text display-4">{{ stats.failed }}</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Resolved</h5>
+                    <p class="card-text display-4">{{ stats.resolved }}</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Filter -->
+    <div class="mb-4">
+        <form class="form-inline">
+            <label class="mr-2">Status:</label>
+            <select class="form-control mr-2" name="status" onchange="this.form.submit()">
+                <option value="all" {% if current_status == 'all' %}selected{% endif %}>All</option>
+                <option value="pending" {% if current_status == 'pending' %}selected{% endif %}>Pending</option>
+                <option value="failed" {% if current_status == 'failed' %}selected{% endif %}>Failed</option>
+                <option value="resolved" {% if current_status == 'resolved' %}selected{% endif %}>Resolved</option>
+            </select>
+        </form>
+    </div>
+    
+    <!-- Failed Downloads Table -->
+    <div class="table-responsive">
+        <table class="table table-striped">
+            <thead>
+                <tr>
+                    <th>URL</th>
+                    <th>Author</th>
+                    <th>First Attempt</th>
+                    <th>Last Attempt</th>
+                    <th>Attempts</th>
+                    <th>Status</th>
+                    <th>Archive Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in items %}
+                <tr>
+                    <td>
+                        <a href="{{ item.url }}" target="_blank">{{ item.url }}</a>
+                        <br>
+                        <small class="text-muted">
+                            <a href="{{ item.page_url }}" target="_blank">Page URL</a>
+                        </small>
+                    </td>
+                    <td>{{ item.author or 'Unknown' }}</td>
+                    <td>{{ item.first_attempt }}</td>
+                    <td>{{ item.last_attempt }}</td>
+                    <td>{{ item.attempts }}</td>
+                    <td>
+                        <span class="badge badge-{{ {
+                            'pending': 'warning',
+                            'failed': 'danger',
+                            'resolved': 'success'
+                        }[item.status] }}">{{ item.status }}</span>
+                    </td>
+                    <td>
+                        {% if item.archive_url %}
+                            <a href="{{ item.archive_url }}" target="_blank" class="badge badge-info">
+                                {{ item.archive_status }}
+                            </a>
+                        {% else %}
+                            <span class="badge badge-secondary">Not archived</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if item.status != 'resolved' %}
+                            <button class="btn btn-sm btn-success" onclick="resolveItem({{ item.id }})">
+                                Mark Resolved
+                            </button>
+                        {% endif %}
+                        {% if item.status == 'failed' %}
+                            <button class="btn btn-sm btn-warning" onclick="retryItem({{ item.id }})">
+                                Retry
+                            </button>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    
+    <!-- Pagination -->
+    {% if total_pages > 1 %}
+    <nav aria-label="Page navigation">
+        <ul class="pagination justify-content-center">
+            {% if page > 1 %}
+            <li class="page-item">
+                <a class="page-link" href="{{ url_for('failed_downloads', page=page-1, status=current_status) }}">Previous</a>
+            </li>
+            {% endif %}
+            
+            {% for p in range(max(1, page-2), min(total_pages+1, page+3)) %}
+            <li class="page-item {% if p == page %}active{% endif %}">
+                <a class="page-link" href="{{ url_for('failed_downloads', page=p, status=current_status) }}">{{ p }}</a>
+            </li>
+            {% endfor %}
+            
+            {% if page < total_pages %}
+            <li class="page-item">
+                <a class="page-link" href="{{ url_for('failed_downloads', page=page+1, status=current_status) }}">Next</a>
+            </li>
+            {% endif %}
+        </ul>
+    </nav>
+    {% endif %}
+</div>
+
+<!-- JavaScript for actions -->
+<script>
+function resolveItem(id) {
+    if (confirm('Are you sure you want to mark this item as resolved?')) {
+        fetch(`/api/failed_downloads/${id}/resolve`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                location.reload();
+            } else {
+                alert('Failed to resolve item: ' + data.error);
+            }
+        })
+        .catch(error => {
+            alert('Error: ' + error);
+        });
+    }
+}
+
+function retryItem(id) {
+    if (confirm('Are you sure you want to retry this item?')) {
+        fetch(`/api/failed_downloads/${id}/retry`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                location.reload();
+            } else {
+                alert('Failed to retry item: ' + data.error);
+            }
+        })
+        .catch(error => {
+            alert('Error: ' + error);
+        });
+    }
+}
+</script>
+{% endblock %} 

@@ -420,6 +420,48 @@ class ArchiveSubmitter:
         except Exception as e:
             logger.error(f"Error processing favorite authors: {e}")
 
+    def process_failed_downloads(self):
+        """Process failed downloads that need archiving."""
+        try:
+            # Get failed downloads that haven't been archived
+            self.cursor.execute("""
+                SELECT fd.url, fd.page_url, fd.author
+                FROM failed_downloads fd
+                LEFT JOIN archive_submissions a ON fd.page_url = a.url
+                WHERE fd.status = 'failed'
+                AND (a.id IS NULL OR (a.status = 'failed' AND a.retry_count < 3))
+                ORDER BY fd.last_attempt DESC
+                LIMIT 60  -- Process in batches
+            """)
+            
+            failed_items = self.cursor.fetchall()
+            if not failed_items:
+                return
+                
+            logger.info(f"Found {len(failed_items)} failed downloads to archive")
+            
+            for url, page_url, author in failed_items:
+                # Check if already in archive.org
+                archived_org, archive_org_url = self.check_archive_org(page_url)
+                archived_ph, archive_ph_url = self.check_archive_ph(page_url)
+                
+                # Submit to archive.org if needed
+                if not archived_org:
+                    if self.submit_to_archive_org(page_url):
+                        logger.info(f"Submitted failed download to archive.org: {page_url}")
+                        self.update_submission_status(page_url, 'pending', 'archive.org')
+                
+                # Submit to archive.ph if needed
+                if not archived_ph:
+                    if self.submit_to_archive_ph(page_url):
+                        logger.info(f"Submitted failed download to archive.ph: {page_url}")
+                        self.update_submission_status(page_url, 'pending', 'archive.ph')
+                
+                time.sleep(5)  # Rate limiting
+                
+        except Exception as e:
+            logger.error(f"Error processing failed downloads: {e}")
+
     def run(self):
         """Main loop for the archive submitter."""
         logger.info("Starting archive submitter service")
@@ -436,6 +478,10 @@ class ArchiveSubmitter:
                 
                 logger.info("Processing favorite authors...")
                 self.process_favorite_authors()
+                time.sleep(TASK_INTERVAL)  # Short break between tasks
+                
+                logger.info("Processing failed downloads...")
+                self.process_failed_downloads()
                 time.sleep(TASK_INTERVAL)  # Short break between tasks
                 
                 logger.info("Processing pending images...")

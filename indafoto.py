@@ -135,6 +135,21 @@ def init_db():
     )
     """)
     
+    # Create failed_downloads table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS failed_downloads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        url TEXT UNIQUE,
+        page_url TEXT,
+        author TEXT,
+        first_attempt TEXT,
+        last_attempt TEXT,
+        attempts INTEGER DEFAULT 1,
+        error TEXT,
+        status TEXT DEFAULT 'pending'  -- 'pending', 'resolved', 'failed'
+    )
+    """)
+    
     # Create index on url for faster lookups
     cursor.execute("""
     CREATE INDEX IF NOT EXISTS idx_images_url ON images(url)
@@ -1368,6 +1383,25 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 pass
             return ('error', ('validation', url, str(e)))
     
+    def record_failed_download(url, page_url, author, error):
+        """Record a failed download in the database."""
+        try:
+            cursor.execute("""
+                INSERT INTO failed_downloads (url, page_url, author, first_attempt, last_attempt, error)
+                VALUES (?, ?, ?, datetime('now'), datetime('now'), ?)
+                ON CONFLICT(url) DO UPDATE SET
+                    last_attempt = datetime('now'),
+                    attempts = attempts + 1,
+                    error = ?,
+                    status = CASE 
+                        WHEN attempts + 1 >= 3 THEN 'failed'
+                        ELSE 'pending'
+                    END
+            """, (url, page_url, author, error, error))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to record failed download: {e}")
+    
     try:
         # First pass: check for duplicates and prepare work queue
         image_ids_to_process = []
@@ -1435,6 +1469,9 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                             banned_count += 1
                             pbar.update(1)
                         elif status == 'error':
+                            error_type, url, error_msg = data
+                            if error_type == 'metadata':
+                                record_failed_download(image_data['image_url'], url, None, f"Metadata error: {error_msg}")
                             failed_count += 1
                             pbar.update(1)
                         
@@ -1452,6 +1489,9 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                             filename, url, metadata = data
                             validation_pool.add_task(process_validation, filename, url, metadata)
                         elif status == 'error':
+                            error_type, url, error_msg = data
+                            if error_type == 'download':
+                                record_failed_download(url, metadata['page_url'], metadata['author'], f"Download error: {error_msg}")
                             failed_count += 1
                             pbar.update(1)
                         
@@ -1498,6 +1538,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                                 conn.commit()
                             except Exception as e:
                                 logger.error(f"Error saving to database: {e}")
+                                record_failed_download(url, metadata['page_url'], metadata['author'], f"Database error: {e}")
                                 failed_count += 1
                                 try:
                                     if os.path.exists(filename):
@@ -1505,6 +1546,9 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                                 except:
                                     pass
                         elif status == 'error':
+                            error_type, url, error_msg = data
+                            if error_type == 'validation':
+                                record_failed_download(url, metadata['page_url'], metadata['author'], f"Validation error: {error_msg}")
                             failed_count += 1
                         
                         pbar.update(1)
