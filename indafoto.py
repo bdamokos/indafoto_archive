@@ -135,21 +135,6 @@ def init_db():
     )
     """)
     
-    # Create failed_downloads table
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS failed_downloads (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        url TEXT UNIQUE,
-        page_url TEXT,
-        author TEXT,
-        first_attempt TEXT,
-        last_attempt TEXT,
-        attempts INTEGER DEFAULT 1,
-        error TEXT,
-        status TEXT DEFAULT 'pending'  -- 'pending', 'resolved', 'failed'
-    )
-    """)
-    
     # Create index on url for faster lookups
     cursor.execute("""
     CREATE INDEX IF NOT EXISTS idx_images_url ON images(url)
@@ -1344,7 +1329,6 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
             metadata = extract_metadata(image_data['page_url'], session=session)
             if metadata:
                 if is_author_banned(metadata['author']):
-                    logger.info(f"Skipping image from banned author {metadata['author']}: {image_data['page_url']}")
                     return ('banned', None)
                 
                 url = image_data['image_url']
@@ -1383,29 +1367,6 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
             except:
                 pass
             return ('error', ('validation', url, str(e)))
-    
-    def record_failed_download(url, page_url, author, error):
-        """Record a failed download in the database."""
-        # Only record if we have both a valid URL and page URL
-        if not url or url == 'unknown' or not page_url or page_url == 'unknown':
-            return
-            
-        try:
-            cursor.execute("""
-                INSERT INTO failed_downloads (url, page_url, author, first_attempt, last_attempt, error)
-                VALUES (?, ?, ?, datetime('now'), datetime('now'), ?)
-                ON CONFLICT(url) DO UPDATE SET
-                    last_attempt = datetime('now'),
-                    attempts = attempts + 1,
-                    error = ?,
-                    status = CASE 
-                        WHEN attempts + 1 >= 3 THEN 'failed'
-                        ELSE 'pending'
-                    END
-            """, (url, page_url, author, error, error))
-            conn.commit()
-        except Exception as e:
-            logger.error(f"Failed to record failed download: {e}")
     
     try:
         # First pass: check for duplicates and prepare work queue
@@ -1474,9 +1435,6 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                             banned_count += 1
                             pbar.update(1)
                         elif status == 'error':
-                            error_type, url, error_msg = data
-                            if error_type == 'metadata':
-                                record_failed_download(image_data['image_url'], url, None, f"Metadata error: {error_msg}")
                             failed_count += 1
                             pbar.update(1)
                         
@@ -1494,18 +1452,6 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                             filename, url, metadata = data
                             validation_pool.add_task(process_validation, filename, url, metadata)
                         elif status == 'error':
-                            error_type, url, error_msg = data
-                            if error_type == 'download':
-                                # Get metadata from the metadata result
-                                metadata = None
-                                for result in metadata_pool.results.queue:
-                                    if result[1][0] == url:  # Check if this result has our URL
-                                        metadata = result[1][1]  # Get metadata from metadata result
-                                        break
-                                if metadata:
-                                    record_failed_download(url, metadata['page_url'], metadata['author'], f"Download error: {error_msg}")
-                                else:
-                                    record_failed_download(url, None, None, f"Download error: {error_msg}")
                             failed_count += 1
                             pbar.update(1)
                         
@@ -1552,7 +1498,6 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                                 conn.commit()
                             except Exception as e:
                                 logger.error(f"Error saving to database: {e}")
-                                record_failed_download(url, metadata['page_url'], metadata['author'], f"Database error: {e}")
                                 failed_count += 1
                                 try:
                                     if os.path.exists(filename):
@@ -1560,18 +1505,6 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                                 except:
                                     pass
                         elif status == 'error':
-                            error_type, url, error_msg = data
-                            if error_type == 'validation':
-                                # Get metadata from the download result
-                                metadata = None
-                                for result in download_pool.results.queue:
-                                    if result[1][1] == url:  # Check if this result has our URL
-                                        metadata = result[1][2]  # Get metadata from download result
-                                        break
-                                if metadata:
-                                    record_failed_download(url, metadata['page_url'], metadata['author'], f"Validation error: {error_msg}")
-                                else:
-                                    record_failed_download(url, None, None, f"Validation error: {error_msg}")
                             failed_count += 1
                         
                         pbar.update(1)
@@ -1591,25 +1524,13 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 
                 time.sleep(0.1)  # Small sleep to prevent busy waiting
         
-        # Check for any unprocessed images at the end
-        total_processed = processed_count + failed_count + banned_count
-        if total_processed < len(image_ids_to_process):
-            unprocessed_count = len(image_ids_to_process) - total_processed
-            logger.warning(f"Found {unprocessed_count} unprocessed images")
-            # Only record unprocessed images that have valid URLs
-            for image_data in image_ids_to_process[total_processed:]:
-                url = image_data.get('image_url')
-                page_url = image_data.get('page_url')
-                if url and page_url and url != 'unknown' and page_url != 'unknown':
-                    record_failed_download(url, page_url, None, "Image was not processed in pipeline")
-        
         # Shutdown thread pools
         metadata_pool.shutdown()
         download_pool.shutdown()
         validation_pool.shutdown()
         
         # Return success status and stats
-        success = (processed_count + failed_count + banned_count) == len(image_ids_to_process)
+        success = (processed_count + failed_count) == len(image_ids_to_process) and failed_count == 0
         stats = {
             'processed_count': processed_count,
             'failed_count': failed_count,
@@ -1623,25 +1544,14 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
             'current_wait_time': current_wait_time
         }
         
-        # Log summary including banned count
-        if banned_count > 0:
-            logger.info(f"Skipped {banned_count} images from banned authors")
-        
         return success, stats
         
     except Exception as e:
         logger.error(f"Error in process_image_list: {str(e)}")
-        # Only record unprocessed images that have valid URLs
-        for image_data in image_ids_to_process[processed_count + failed_count + banned_count:]:
-            url = image_data.get('image_url')
-            page_url = image_data.get('page_url')
-            if url and page_url and url != 'unknown' and page_url != 'unknown':
-                record_failed_download(url, page_url, None, f"Process error: {str(e)}")
         return False, {
             'processed_count': processed_count,
             'failed_count': failed_count + len(image_data_list) - processed_count,
             'skipped_count': skipped_count,
-            'banned_count': banned_count,
             'total_images': len(image_data_list),
             'author_counts': author_image_counts,
             'error': str(e)
