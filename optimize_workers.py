@@ -1,20 +1,15 @@
 import os
-import sqlite3
 import time
 import logging
 from datetime import datetime
 import json
-import threading
 import queue
 from pathlib import Path
-import shutil
-from tqdm import tqdm
 import argparse
 import niquests as requests
 from indafoto import (
     init_db, get_image_links, process_image_list,
-    check_disk_space, estimate_space_requirements,
-    get_free_space_gb, HEADERS, COOKIES, extract_image_id
+    check_disk_space, HEADERS, COOKIES, extract_image_id
 )
 
 # Configure logging
