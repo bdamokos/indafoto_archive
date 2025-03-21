@@ -714,7 +714,7 @@ def extract_metadata(photo_page_url, attempt=1, session=None):
             for pattern in img_patterns:
                 img_link = soup.find('a', href=lambda x: x and pattern in x)
                 if img_link:
-                    high_res_url = get_high_res_url(img_link['href'], session=session)
+                    high_res_url = img_link['href']
                     break
 
         metadata = {
@@ -1312,7 +1312,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
     banned_count = 0
     
     # Create thread pools for different operations
-    metadata_pool = ThreadPool(max(current_workers*4, 36), "metadata")
+    metadata_pool = ThreadPool(max(current_workers*4, 12), "metadata")
     download_pool = ThreadPool(current_workers, "download")
     validation_pool = ThreadPool(current_workers, "validation")
     
@@ -1883,121 +1883,128 @@ def redownload_author_images(author_name):
         
     logger.info(f"Found {len(images)} images to redownload")
     
+    # Create a session to reuse for all requests
+    session = create_session()
+    
     # Keep track of changes
     redownloaded = 0
     failed = 0
     different = 0
     
-    for image in tqdm(images, desc=f"Redownloading images for {author_name}", colour='yellow'):
-        image_id, url, page_url, old_path, old_hash = image
-        
-        try:
-            # Get fresh metadata from the page
-            metadata = extract_metadata(page_url)
-            if not metadata:
-                logger.error(f"Failed to get metadata for {page_url}")
+    try:
+        for image in tqdm(images, desc=f"Redownloading images for {author_name}", colour='yellow'):
+            image_id, url, page_url, old_path, old_hash = image
+            
+            try:
+                # Get fresh metadata from the page
+                metadata = extract_metadata(page_url, session=session)
+                if not metadata:
+                    logger.error(f"Failed to get metadata for {page_url}")
+                    failed += 1
+                    continue
+                
+                # Try to get high-res version of the image using our optimized function
+                download_url = get_high_res_url(url, session=session)
+                
+                # Download the image
+                new_path, new_hash = download_image(download_url, author_name, session=session)
+                
+                if not new_path or not new_hash:
+                    logger.error(f"Failed to download {download_url}")
+                    failed += 1
+                    continue
+                
+                # Compare hashes
+                if new_hash != old_hash:
+                    logger.warning(f"Hash mismatch for {url}")
+                    logger.warning(f"Old hash: {old_hash}")
+                    logger.warning(f"New hash: {new_hash}")
+                    different += 1
+                    
+                    # Delete old database entries
+                    delete_image_data(conn, cursor, image_id)
+                    
+                    # Insert new data
+                    cursor.execute("""
+                        INSERT INTO images (
+                            url, local_path, sha256_hash, title, author, author_url,
+                            license, camera_make, camera_model, focal_length, aperture,
+                            shutter_speed, taken_date, upload_date, page_url
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        url, new_path, new_hash, metadata['title'],
+                        metadata['author'], metadata['author_url'], metadata['license'],
+                        metadata['camera_make'], metadata['camera_model'], metadata['focal_length'],
+                        metadata['aperture'], metadata['shutter_speed'],
+                        metadata['taken_date'], metadata['upload_date'], metadata['page_url']
+                    ))
+                    
+                    # Get the new image ID
+                    new_image_id = cursor.lastrowid
+                    
+                    # Process galleries
+                    for gallery in metadata.get('collections', []):
+                        cursor.execute("""
+                            INSERT OR IGNORE INTO collections (collection_id, title, url, is_public)
+                            VALUES (?, ?, ?, ?)
+                        """, (gallery['id'], gallery['title'], gallery['url'], gallery['is_public']))
+                        
+                        cursor.execute("SELECT id FROM collections WHERE collection_id = ?", (gallery['id'],))
+                        gallery_db_id = cursor.fetchone()[0]
+                        
+                        cursor.execute("""
+                            INSERT INTO image_collections (image_id, collection_id)
+                            VALUES (?, ?)
+                        """, (new_image_id, gallery_db_id))
+                    
+                    # Process albums
+                    for gallery in metadata.get('albums', []):
+                        cursor.execute("""
+                            INSERT OR IGNORE INTO albums (album_id, title, url, is_public)
+                            VALUES (?, ?, ?, ?)
+                        """, (gallery['id'], gallery['title'], gallery['url'], gallery['is_public']))
+                        
+                        cursor.execute("SELECT id FROM albums WHERE album_id = ?", (gallery['id'],))
+                        gallery_db_id = cursor.fetchone()[0]
+                        
+                        cursor.execute("""
+                            INSERT INTO image_albums (image_id, album_id)
+                            VALUES (?, ?)
+                        """, (new_image_id, gallery_db_id))
+                    
+                    # Process tags
+                    for tag in metadata.get('tags', []):
+                        cursor.execute("""
+                            INSERT OR IGNORE INTO tags (name, count)
+                            VALUES (?, ?)
+                        """, (tag['name'], tag['count']))
+                        
+                        cursor.execute("SELECT id FROM tags WHERE name = ?", (tag['name'],))
+                        tag_db_id = cursor.fetchone()[0]
+                        
+                        cursor.execute("""
+                            INSERT INTO image_tags (image_id, tag_id)
+                            VALUES (?, ?)
+                        """, (new_image_id, tag_db_id))
+                    
+                    conn.commit()
+                    
+                    # Delete the old file
+                    try:
+                        if os.path.exists(old_path):
+                            os.remove(old_path)
+                    except Exception as e:
+                        logger.error(f"Failed to delete old file {old_path}: {e}")
+                    
+                    redownloaded += 1
+                    
+            except Exception as e:
+                logger.error(f"Error processing {url}: {e}")
                 failed += 1
                 continue
-            
-            # Try to get high-res version of the image using our optimized function
-            download_url = get_high_res_url(url)
-            
-            # Download the image
-            new_path, new_hash = download_image(download_url, author_name)
-            
-            if not new_path or not new_hash:
-                logger.error(f"Failed to download {download_url}")
-                failed += 1
-                continue
-            
-            # Compare hashes
-            if new_hash != old_hash:
-                logger.warning(f"Hash mismatch for {url}")
-                logger.warning(f"Old hash: {old_hash}")
-                logger.warning(f"New hash: {new_hash}")
-                different += 1
-                
-                # Delete old database entries
-                delete_image_data(conn, cursor, image_id)
-                
-                # Insert new data
-                cursor.execute("""
-                    INSERT INTO images (
-                        url, local_path, sha256_hash, title, author, author_url,
-                        license, camera_make, camera_model, focal_length, aperture,
-                        shutter_speed, taken_date, upload_date, page_url
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    url, new_path, new_hash, metadata['title'],
-                    metadata['author'], metadata['author_url'], metadata['license'],
-                    metadata['camera_make'], metadata['camera_model'], metadata['focal_length'],
-                    metadata['aperture'], metadata['shutter_speed'],
-                    metadata['taken_date'], metadata['upload_date'], metadata['page_url']
-                ))
-                
-                # Get the new image ID
-                new_image_id = cursor.lastrowid
-                
-                # Process galleries
-                for gallery in metadata.get('collections', []):
-                    cursor.execute("""
-                        INSERT OR IGNORE INTO collections (collection_id, title, url, is_public)
-                        VALUES (?, ?, ?, ?)
-                    """, (gallery['id'], gallery['title'], gallery['url'], gallery['is_public']))
-                    
-                    cursor.execute("SELECT id FROM collections WHERE collection_id = ?", (gallery['id'],))
-                    gallery_db_id = cursor.fetchone()[0]
-                    
-                    cursor.execute("""
-                        INSERT INTO image_collections (image_id, collection_id)
-                        VALUES (?, ?)
-                    """, (new_image_id, gallery_db_id))
-                
-                # Process albums
-                for gallery in metadata.get('albums', []):
-                    cursor.execute("""
-                        INSERT OR IGNORE INTO albums (album_id, title, url, is_public)
-                        VALUES (?, ?, ?, ?)
-                    """, (gallery['id'], gallery['title'], gallery['url'], gallery['is_public']))
-                    
-                    cursor.execute("SELECT id FROM albums WHERE album_id = ?", (gallery['id'],))
-                    gallery_db_id = cursor.fetchone()[0]
-                    
-                    cursor.execute("""
-                        INSERT INTO image_albums (image_id, album_id)
-                        VALUES (?, ?)
-                    """, (new_image_id, gallery_db_id))
-                
-                # Process tags
-                for tag in metadata.get('tags', []):
-                    cursor.execute("""
-                        INSERT OR IGNORE INTO tags (name, count)
-                        VALUES (?, ?)
-                    """, (tag['name'], tag['count']))
-                    
-                    cursor.execute("SELECT id FROM tags WHERE name = ?", (tag['name'],))
-                    tag_db_id = cursor.fetchone()[0]
-                    
-                    cursor.execute("""
-                        INSERT INTO image_tags (image_id, tag_id)
-                        VALUES (?, ?)
-                    """, (new_image_id, tag_db_id))
-                
-                conn.commit()
-                
-                # Delete the old file
-                try:
-                    if os.path.exists(old_path):
-                        os.remove(old_path)
-                except Exception as e:
-                    logger.error(f"Failed to delete old file {old_path}: {e}")
-            
-            redownloaded += 1
-            
-        except Exception as e:
-            logger.error(f"Error processing {url}: {e}")
-            failed += 1
-            continue
+    finally:
+        # Clean up the session
+        session.close()
     
     # Print summary
     logger.info("\nRedownload Summary:")
@@ -2018,25 +2025,23 @@ def get_high_res_url(url, session=None):
     # Very short timeout - fail fast
     timeout = 1.5
     
+    # Create a session without retries for high-res checks
+    if not session:
+        temp_session = create_session()
+        temp_session.mount('https://', requests.adapters.HTTPAdapter(max_retries=0))
+        temp_session.mount('http://', requests.adapters.HTTPAdapter(max_retries=0))
+        session = temp_session
+    
     # Try higher resolution versions in order
     for res in ['_xxl.jpg', '_xl.jpg']:
         test_url = url.replace('_l.jpg', res)
         try:
-            if session:
-                response = session.get(
-                    test_url, 
-                    headers=headers,
-                    timeout=timeout, 
-                    stream=True
-                )
-            else:
-                temp_session = create_session()
-                response = temp_session.get(
-                    test_url, 
-                    headers=headers,
-                    timeout=timeout, 
-                    stream=True
-                )
+            response = session.get(
+                test_url, 
+                headers=headers,
+                timeout=timeout, 
+                stream=True
+            )
             
             # If the response is successful (200 OK or 206 Partial Content)
             if response.status_code in [200, 206]:
