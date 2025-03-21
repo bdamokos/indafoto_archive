@@ -350,11 +350,26 @@ def get_image_links(search_page_url, attempt=1, session=None):
         logger.info(f"Response status code: {response.status_code}")
         logger.info(f"Response URL after redirects: {response.url}")
         
-        # Special handling for 50x errors
-        if response.status_code in [503, 504, 500, 502, 507, 508, 509]:
-            error_msg = f"Server Error ({response.status_code}) for {search_page_url}"
+        # Special handling for server errors (5xx) and client timeout errors (408, 429)
+        if response.status_code in [408, 429, 500, 502, 503, 504, 507, 508, 509]:
+            error_msg = f"Error ({response.status_code}) for {search_page_url}"
             logger.error(error_msg)
-            # Raise a specific exception for 50x errors
+            # Determine backoff time based on error code and attempt number
+            if response.status_code == 408:  # Request Timeout
+                backoff_time = min(30 * attempt, 300)  # Max 5 minutes
+                logger.info(f"Request Timeout (408), backing off for {backoff_time} seconds")
+                time.sleep(backoff_time)
+            elif response.status_code == 429:  # Too Many Requests
+                backoff_time = min(60 * attempt, 600)  # Max 10 minutes
+                logger.info(f"Rate limited (429), backing off for {backoff_time} seconds")
+                time.sleep(backoff_time)
+            
+            # If this is not the final attempt, retry recursively with increased attempt count
+            if attempt < 3:  # Max 3 attempts
+                logger.info(f"Retrying {search_page_url} (attempt {attempt + 1})")
+                return get_image_links(search_page_url, attempt=attempt + 1, session=session)
+            
+            # If all retries failed, raise the exception to be handled by the caller
             raise requests.exceptions.HTTPError(f"Server Error ({response.status_code})")
         
         response.raise_for_status()
@@ -397,10 +412,19 @@ def get_image_links(search_page_url, attempt=1, session=None):
         logger.info(f"Found {len(image_data)} images with metadata on page {search_page_url}")
         return image_data
     except requests.exceptions.HTTPError as e:
-        if any(str(code) in str(e) for code in [503, 504, 500, 502, 507, 508, 509]):
-            # Re-raise the HTTPError for 50x errors to be handled by the caller
+        if any(str(code) in str(e) for code in [408, 429, 500, 502, 503, 504, 507, 508, 509]):
+            # Re-raise these specific errors to be handled by the caller
             raise
         logger.error(f"HTTP error for {search_page_url}: {e}")
+        return []
+    except requests.exceptions.Timeout as e:
+        # Handle timeout errors with retry logic
+        logger.error(f"Timeout error for {search_page_url}: {e}")
+        if attempt < 3:  # Max 3 attempts
+            backoff_time = 30 * attempt  # Progressive backoff
+            logger.info(f"Backing off for {backoff_time} seconds before retrying")
+            time.sleep(backoff_time)
+            return get_image_links(search_page_url, attempt=attempt + 1, session=session)
         return []
     except requests.RequestException as e:
         logger.error(f"Failed to fetch {search_page_url}: {e}")
@@ -1331,12 +1355,30 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 filename, url, metadata = item
                 
                 try:
-                    # Verify it's a valid JPEG
+                    # Verify it's a valid image and update extension if needed
                     with Image.open(filename) as img:
-                        if img.format != 'JPEG':
-                            raise ValueError(f"Downloaded file is not a JPEG (format: {img.format})")
                         # Force load the image to verify it's not corrupted
                         img.load()
+                        
+                        # Check if we need to update the file extension
+                        if img.format != 'JPEG':
+                            logger.info(f"Image is {img.format} format instead of JPEG")
+                            ext_map = {
+                                'PNG': '.png',
+                                'GIF': '.gif',
+                                'WEBP': '.webp',
+                                'BMP': '.bmp',
+                                'TIFF': '.tiff'
+                            }
+                            
+                            # Get the appropriate extension
+                            new_ext = ext_map.get(img.format, '.jpg')
+                            if not filename.lower().endswith(new_ext.lower()):
+                                # Rename the file with the correct extension
+                                new_filename = os.path.splitext(filename)[0] + new_ext
+                                os.rename(filename, new_filename)
+                                filename = new_filename
+                                logger.info(f"Renamed file to {os.path.basename(filename)} to match {img.format} format")
                     
                     # Calculate hash
                     file_hash = calculate_file_hash(filename)
@@ -1410,63 +1452,80 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
         
         logger.info(f"Found {len(image_ids_to_process)} new images to process")
         
-        # Start metadata workers - now equal to download workers
+        # Initialize threads
         metadata_threads = []
-        for _ in range(current_workers):
-            t = threading.Thread(target=metadata_worker)
-            t.daemon = True
-            t.start()
-            metadata_threads.append(t)
-        
-        # Start download workers
         download_threads = []
-        for _ in range(current_workers):
-            t = threading.Thread(target=download_worker)
-            t.daemon = True
-            t.start()
-            download_threads.append(t)
-        
-        # Start validation workers
         validation_threads = []
         validation_progress = tqdm(total=len(image_ids_to_process), desc="Validating images", position=2, colour='yellow')
-        for _ in range(current_workers):
-            t = threading.Thread(target=validation_worker, args=(validation_progress,))
-            t.daemon = True
-            t.start()
-            validation_threads.append(t)
         
-        # Feed metadata queue in batches to prevent overwhelming
-        batch_size = current_workers * 2
-        for i in range(0, len(image_ids_to_process), batch_size):
-            batch = image_ids_to_process[i:i + batch_size]
-            for image_data in batch:
-                metadata_queue.put(image_data)
-            # Wait for the batch to be processed before adding more
+        try:
+            # Start metadata workers - now equal to download workers
+            for _ in range(current_workers):
+                t = threading.Thread(target=metadata_worker)
+                t.daemon = True
+                t.start()
+                metadata_threads.append(t)
+            
+            # Start download workers
+            for _ in range(current_workers):
+                t = threading.Thread(target=download_worker)
+                t.daemon = True
+                t.start()
+                download_threads.append(t)
+            
+            # Start validation workers
+            for _ in range(current_workers):
+                t = threading.Thread(target=validation_worker, args=(validation_progress,))
+                t.daemon = True
+                t.start()
+                validation_threads.append(t)
+            
+            # Feed metadata queue in batches to prevent overwhelming
+            batch_size = current_workers * 2
+            for i in range(0, len(image_ids_to_process), batch_size):
+                batch = image_ids_to_process[i:i + batch_size]
+                for image_data in batch:
+                    metadata_queue.put(image_data)
+                # Wait for the batch to be processed before adding more
+                metadata_queue.join()
+            
+            # Add poison pills for metadata workers
+            for _ in range(len(metadata_threads)):
+                metadata_queue.put(None)
+            
+            # Wait for metadata queue to be processed
             metadata_queue.join()
-        
-        # Add poison pills for metadata workers
-        for _ in range(len(metadata_threads)):
-            metadata_queue.put(None)
-        
-        # Wait for metadata queue to be processed
-        metadata_queue.join()
-        
-        # Add poison pills for download workers
-        for _ in range(len(download_threads)):
-            download_queue.put(None)
-        
-        # Wait for download queue to be processed
-        download_queue.join()
-        
-        # Add poison pills for validation workers
-        for _ in range(len(validation_threads)):
-            validation_queue.put(None)
-        
-        # Wait for validation queue to be processed
-        validation_queue.join()
-        
-        # Close the progress bar
-        validation_progress.close()
+            
+            # Add poison pills for download workers
+            for _ in range(len(download_threads)):
+                download_queue.put(None)
+            
+            # Wait for download queue to be processed
+            download_queue.join()
+            
+            # Add poison pills for validation workers
+            for _ in range(len(validation_threads)):
+                validation_queue.put(None)
+            
+            # Wait for validation queue to be processed
+            validation_queue.join()
+            
+            # Properly join all threads to ensure cleanup
+            logger.info("Waiting for all worker threads to finish...")
+            for t in metadata_threads:
+                t.join(timeout=5)
+            for t in download_threads:
+                t.join(timeout=5)
+            for t in validation_threads:
+                t.join(timeout=5)
+            
+            # Check for any threads that didn't exit properly
+            alive_threads = [t for t in metadata_threads + download_threads + validation_threads if t.is_alive()]
+            if alive_threads:
+                logger.warning(f"{len(alive_threads)} worker threads didn't exit properly")
+        finally:
+            # Close the progress bar
+            validation_progress.close()
         
         # Process results and errors
         downloaded_images = []
