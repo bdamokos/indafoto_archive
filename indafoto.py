@@ -1355,31 +1355,6 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 filename, url, metadata = item
                 
                 try:
-                    # Verify it's a valid image and update extension if needed
-                    with Image.open(filename) as img:
-                        # Force load the image to verify it's not corrupted
-                        img.load()
-                        
-                        # Check if we need to update the file extension
-                        if img.format != 'JPEG':
-                            logger.info(f"Image is {img.format} format instead of JPEG")
-                            ext_map = {
-                                'PNG': '.png',
-                                'GIF': '.gif',
-                                'WEBP': '.webp',
-                                'BMP': '.bmp',
-                                'TIFF': '.tiff'
-                            }
-                            
-                            # Get the appropriate extension
-                            new_ext = ext_map.get(img.format, '.jpg')
-                            if not filename.lower().endswith(new_ext.lower()):
-                                # Rename the file with the correct extension
-                                new_filename = os.path.splitext(filename)[0] + new_ext
-                                os.rename(filename, new_filename)
-                                filename = new_filename
-                                logger.info(f"Renamed file to {os.path.basename(filename)} to match {img.format} format")
-                    
                     # Calculate hash
                     file_hash = calculate_file_hash(filename)
                     
@@ -1387,7 +1362,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                     results_queue.put((filename, file_hash, url, metadata))
                     
                     # Update progress bar with author info
-                    progress_bar.set_description(f"Validating {metadata['author']}")
+                    progress_bar.set_description(f"Processing {metadata['author']}")
                     progress_bar.update(1)
                     
                 except Exception as e:
