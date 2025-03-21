@@ -29,7 +29,7 @@ services:
     build: .
     command: python indafoto_archive_explorer.py
     ports:
-      - "5001:5001"
+      - "5031:5001"
     volumes:
       - ${DATA_PATH:-/mnt/usb/indafoto}/indafoto.db:/app/indafoto.db
       - ${DATA_PATH:-/mnt/usb/indafoto}/indafoto_archive:/app/indafoto_archive
