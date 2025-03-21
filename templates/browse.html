@@ -81,7 +81,14 @@
     <div class="col-md-3 mb-4">
         <div class="card image-card">
             <a href="/image/{{ image.id }}">
+                {% if image.local_path %}
                 <img src="{{ url_for('serve_image', image_path=image.local_path) }}" class="card-img-top" alt="{{ image.title }}">
+                {% else %}
+                <div class="card-img-top bg-light d-flex align-items-center justify-content-center" 
+                     style="height: 200px;">
+                    <span class="text-muted">Image not found</span>
+                </div>
+                {% endif %}
             </a>
             <button class="star-button" 
                     onclick="toggleMark({{ image.id }}, this)"
