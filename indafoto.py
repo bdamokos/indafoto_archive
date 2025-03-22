@@ -121,6 +121,10 @@ should_restart = False
 def restart_script():
     """Restart the script while preserving the current state."""
     global should_restart
+    if not args.auto_restart:
+        logger.info("Auto-restart is disabled, continuing without restart")
+        return
+        
     should_restart = True
     logger.info("Initiating script restart...")
     
@@ -2173,6 +2177,8 @@ if __name__ == "__main__":
                        help='Clean up all content from a banned author')
     parser.add_argument('--no-update-check', action='store_true',
                        help='Skip checking for updates')
+    parser.add_argument('--auto-restart', action='store_true',
+                       help='Enable automatic restart every 24 hours (default: disabled)')
     args = parser.parse_args()
     
     try:
