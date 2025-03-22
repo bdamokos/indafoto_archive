@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 DB_FILE = "indafoto.db"
 ARCHIVE_SAMPLE_RATE = 0.005  # 0.5% sample rate for image pages
-CHECK_INTERVAL = 10  # 1 minute between full cycles
+CHECK_INTERVAL = 5  # 5 seconds between full cycles
 TASK_INTERVAL = 5  # 5 seconds between different task types
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15'
