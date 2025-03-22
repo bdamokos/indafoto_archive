@@ -2123,51 +2123,70 @@ def get_high_res_url(url, session=None):
     # Very short timeout - fail fast
     timeout = 1.5
     
-    # Create a session without retries for high-res checks
-    if not session:
-        temp_session = create_session()
-        temp_session.mount('https://', requests.adapters.HTTPAdapter(max_retries=0))
-        temp_session.mount('http://', requests.adapters.HTTPAdapter(max_retries=0))
-        session = temp_session
-    
-    # Try higher resolution versions in order
-    for res in ['_xxl.jpg', '_xl.jpg']:
-        test_url = url.replace('_l.jpg', res)
-        try:
-            response = session.get(
-                test_url, 
-                headers=headers,
-                timeout=timeout, 
-                stream=True
-            )
-            
-            # If the response is successful (200 OK or 206 Partial Content)
-            if response.status_code in [200, 206]:
-                # Read just a tiny bit to verify the content exists
-                for chunk in response.iter_content(chunk_size=256):
-                    if chunk:  # Filter out keep-alive new chunks
+    original_adapters = None
+    try:
+        if session:
+            # Save original adapters
+            original_adapters = {
+                'http': session.adapters['http://'],
+                'https': session.adapters['https://']
+            }
+            # Create new adapters with no retries for this specific use
+            no_retry_adapter = requests.adapters.HTTPAdapter(max_retries=0)
+            session.mount('https://', no_retry_adapter)
+            session.mount('http://', no_retry_adapter)
+        else:
+            # Create a fresh session with no retries
+            session = requests.Session()
+            session.headers.update(HEADERS)
+            session.cookies.update(COOKIES)
+            no_retry_adapter = requests.adapters.HTTPAdapter(max_retries=0)
+            session.mount('https://', no_retry_adapter)
+            session.mount('http://', no_retry_adapter)
+        
+        # Try higher resolution versions in order
+        for res in ['_xxl.jpg', '_xl.jpg']:
+            test_url = url.replace('_l.jpg', res)
+            try:
+                response = session.get(
+                    test_url, 
+                    headers=headers,
+                    timeout=timeout, 
+                    stream=True
+                )
+                
+                # If the response is successful (200 OK or 206 Partial Content)
+                if response.status_code in [200, 206]:
+                    # Read just a tiny bit to verify the content exists
+                    for chunk in response.iter_content(chunk_size=256):
+                        if chunk:  # Filter out keep-alive new chunks
+                            response.close()
+                            return test_url
+                        break  # Only need the first chunk
+                    
+                # Not found, close the response
+                response.close()
+                    
+            except (requests.exceptions.Timeout, 
+                    requests.exceptions.ConnectionError,
+                    OSError) as e:
+                # Silent failure - just continue to next resolution
+                continue
+            finally:
+                # Ensure response is closed in all cases
+                if 'response' in locals():
+                    try:
                         response.close()
-                        return test_url
-                    break  # Only need the first chunk
-                
-            # Not found, close the response
-            response.close()
-                
-        except (requests.exceptions.Timeout, 
-                requests.exceptions.ConnectionError,
-                OSError) as e:
-            # Silent failure - just continue to next resolution
-            continue
-        finally:
-            # Ensure response is closed in all cases
-            if 'response' in locals():
-                try:
-                    response.close()
-                except:
-                    pass
-                
-    # If we can't find higher res versions, return the original
-    return url
+                    except:
+                        pass
+                    
+        # If we can't find higher res versions, return the original
+        return url
+    finally:
+        # Restore original adapters if we modified an existing session
+        if original_adapters:
+            session.mount('http://', original_adapters['http'])
+            session.mount('https://', original_adapters['https'])
 
 
 
