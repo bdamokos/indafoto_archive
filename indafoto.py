@@ -29,7 +29,16 @@ def check_for_updates(filename=None):
     """
     try:
         # Get local file info
-        local_path = os.path.abspath(filename if filename else __file__)
+        if filename is None:
+            filename = __file__
+        
+        # Get absolute path and basename consistently
+        local_path = os.path.abspath(filename)
+        base_filename = os.path.basename(local_path)
+        
+        logger.info(f"Checking for updates for {base_filename}")
+        
+        # Get local file info
         local_mtime = datetime.fromtimestamp(os.path.getmtime(local_path))
         
         with open(local_path, 'r', encoding='utf-8') as f:
@@ -38,7 +47,7 @@ def check_for_updates(filename=None):
         # Get the latest version info from GitHub API first
         api_url = "https://api.github.com/repos/bdamokos/indafoto_archive/commits"
         api_params = {
-            "path": os.path.basename(local_path),
+            "path": base_filename,  # Use consistent basename
             "page": 1,
             "per_page": 1
         }
@@ -48,8 +57,8 @@ def check_for_updates(filename=None):
             commit_info = api_response.json()[0]
             github_date = datetime.strptime(commit_info['commit']['committer']['date'], "%Y-%m-%dT%H:%M:%SZ")
             
-            # Get the file content from GitHub
-            github_url = f"https://raw.githubusercontent.com/bdamokos/indafoto_archive/main/{os.path.basename(local_path)}"
+            # Get the file content from GitHub using consistent basename
+            github_url = f"https://raw.githubusercontent.com/bdamokos/indafoto_archive/main/{base_filename}"
             response = requests.get(github_url, timeout=5)
             
             if response.status_code == 200:
@@ -64,7 +73,7 @@ def check_for_updates(filename=None):
                     
                     # Compare dates to determine if local is newer or older
                     if local_mtime > github_date:
-                        print("NOTE: Your version is newer than the one on GitHub!")
+                        print(f"NOTE: Your version of {base_filename} is newer than the one on GitHub!")
                         print(f"Your version date:   {local_mtime.strftime('%Y-%m-%d %H:%M:%S')}")
                         print(f"GitHub version date: {github_date.strftime('%Y-%m-%d %H:%M:%S')}")
                         print("\nThis might mean:")
@@ -72,11 +81,11 @@ def check_for_updates(filename=None):
                         print("2. Your changes haven't been pushed to GitHub yet")
                         print("3. The file timestamps are incorrect")
                     else:
-                        print("UPDATE AVAILABLE!")
+                        print(f"UPDATE AVAILABLE for {base_filename}!")
                         print(f"Your version date:   {local_mtime.strftime('%Y-%m-%d %H:%M:%S')}")
                         print(f"GitHub version date: {github_date.strftime('%Y-%m-%d %H:%M:%S')}")
                         print("\nTo see what changed:")
-                        print(f"https://github.com/bdamokos/indafoto_archive/commits/main/{os.path.basename(local_path)}")
+                        print(f"https://github.com/bdamokos/indafoto_archive/commits/main/{base_filename}")
                         print("\nTo update:")
                         print("1. If you used git clone:")
                         print("   Run: git pull")
@@ -89,7 +98,7 @@ def check_for_updates(filename=None):
                     # Give user a chance to read the message
                     time.sleep(5)
     except Exception as e:
-        logger.warning(f"Failed to check for updates: {e}")
+        logger.warning(f"Failed to check for updates for {base_filename}: {e}")
 
 # Configure logging
 logging.basicConfig(
