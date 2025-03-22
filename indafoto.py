@@ -20,6 +20,7 @@ import sys
 import subprocess
 import signal
 import atexit
+from io import BytesIO
 
 def check_for_updates(filename=None):
     """Check if there's a newer version of the script available on GitHub.
@@ -1065,9 +1066,6 @@ def download_image(image_url, author, session=None):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")  # Added microseconds for better uniqueness
         filename = os.path.join(save_dir, f"{base_name}_{timestamp}.jpg")
         
-        # Download to a temporary file first
-        temp_filename = filename + '.tmp'
-        
         # Create a lock file to prevent race conditions
         lock_filename = filename + '.lock'
         
@@ -1095,47 +1093,43 @@ def download_image(image_url, author, session=None):
                 total_size = int(response.headers.get('content-length', 0))
                 if total_size == 0:
                     raise ValueError("Server reported content length of 0")
-                    
-                block_size = BLOCK_SIZE  # Use the global BLOCK_SIZE constant
+                
+                # Use BytesIO as an in-memory buffer
+                buffer = BytesIO()
+                sha256_hash = hashlib.sha256()
                 downloaded_size = 0
                 
-                with open(temp_filename, "wb") as file, tqdm(
+                with tqdm(
                     total=total_size,
                     unit='B',
                     unit_scale=True,
                     desc=f"Downloading {os.path.basename(filename)}",
                     colour='green'
                 ) as pbar:
-                    for chunk in response.iter_content(block_size):
+                    for chunk in response.iter_content(chunk_size=BLOCK_SIZE):
                         if not chunk:  # Filter out keep-alive chunks
                             continue
-                        file.write(chunk)
+                        buffer.write(chunk)
+                        sha256_hash.update(chunk)
                         downloaded_size += len(chunk)
                         pbar.update(len(chunk))
                 
                 # Verify the download
                 if downloaded_size != total_size:
                     logger.error(f"Download size mismatch for {image_url}. Expected {total_size}, got {downloaded_size}")
-                    os.remove(temp_filename)
                     return None, None
                 
-                # Move temp file to final location
-                os.rename(temp_filename, filename)
+                # Write the verified data directly to final location
+                with open(filename, 'wb') as f:
+                    f.write(buffer.getvalue())
                 
-                # Return the filename without validation/hash calculation
-                return filename, None
+                # Return the filename and hash
+                return filename, sha256_hash.hexdigest()
                 
         finally:
             # Clean up the lock file
             try:
                 os.remove(lock_filename)
-            except OSError:
-                pass
-            
-            # Clean up temp file if it still exists
-            try:
-                if os.path.exists(temp_filename):
-                    os.remove(temp_filename)
             except OSError:
                 pass
             
