@@ -134,13 +134,14 @@ class ArchiveSubmitter:
             logger.error(f"Failed to check archive.ph for {url}: {e}")
             return False, None
 
-    def fetch_archive_ph_listings(self, domain="indafoto.hu", max_pages=10):
+    def fetch_archive_ph_listings(self, domain="indafoto.hu", max_pages=10, author_pattern=None):
         """
-        Fetch and parse the archive.ph listings for a domain.
+        Fetch and parse the archive.ph listings for a domain or specific author pattern.
         
         Args:
             domain: The domain to search archives for
             max_pages: Maximum number of pages to fetch (20 items per page)
+            author_pattern: Optional specific author URL pattern (e.g., 'https://indafoto.hu/felsmann/*')
             
         Returns:
             A list of tuples (original_url, archive_url, timestamp)
@@ -169,78 +170,91 @@ class ArchiveSubmitter:
                     break
                     
                 logger.info(f"Fetching archive.ph listing page {page+1}/{max_pages} (offset={offset})")
+                
+                # Build the URL based on whether we're searching for a specific author pattern or domain
                 url = f"https://archive.ph/offset={offset}/" if offset > 0 else "https://archive.ph/"
-                url += domain
+                if author_pattern:
+                    logger.info(f"Using author-specific pattern: {author_pattern}")
+                    url += f"https://{domain}/{author_pattern}/*"
+                else:
+                    url += domain
                 
-                response = self.session.get(url, headers=HEADERS, timeout=60)
-                if not response.ok:
-                    logger.error(f"Failed to fetch archive.ph listing page {page+1}: {response.status_code}")
-                    break
-                
-                soup = BeautifulSoup(response.text, "html.parser")
-                
-                # Each row has an id like "row0", "row1", etc.
-                # Each row contains a link to the archived page and the original URL
-                rows = soup.select("div[id^='row']")
-                
-                if not rows:
-                    logger.info(f"No more items found on page {page+1}")
-                    break
-                
-                for row in rows:
-                    try:
-                        # The title and archive URL are in the first link in the TEXT-BLOCK
-                        text_block = row.select_one(".TEXT-BLOCK")
-                        if not text_block:
-                            continue
-                            
-                        archive_link = text_block.select_one("a[href^='https://archive.ph/']")
-                        if not archive_link:
-                            continue
-                            
-                        archive_url = archive_link.get('href')
-                        
-                        # The original URL is in the second link
-                        original_link = text_block.select("a")[1] if len(text_block.select("a")) > 1 else None
-                        if not original_link:
-                            continue
-                            
-                        original_url = original_link.get('href').replace('https://archive.ph/https://', 'https://')
-                        
-                        # Skip non-indafoto.hu URLs
-                        if domain not in original_url:
-                            continue
-                            
-                        # The timestamp is in the THUMBS-BLOCK
-                        thumbs_block = row.select_one(".THUMBS-BLOCK")
-                        if not thumbs_block:
-                            continue
-                            
-                        timestamp_div = thumbs_block.select_one("div[style*='white-space:nowrap']")
-                        if not timestamp_div:
-                            continue
-                            
-                        timestamp_str = timestamp_div.get_text().strip()
-                            
-                        # Parse the timestamp (format: "22 Mar 2025 21:00")
+                try:
+                    response = self.session.get(url, headers=HEADERS, timeout=60)
+                    if response.status_code == 429:
+                        logger.warning(f"Rate limited by archive.ph (429). Stopping pagination.")
+                        break
+                    elif not response.ok:
+                        logger.error(f"Failed to fetch archive.ph listing page {page+1}: {response.status_code}")
+                        break
+                    
+                    soup = BeautifulSoup(response.text, "html.parser")
+                    
+                    # Each row has an id like "row0", "row1", etc.
+                    # Each row contains a link to the archived page and the original URL
+                    rows = soup.select("div[id^='row']")
+                    
+                    if not rows:
+                        logger.info(f"No more items found on page {page+1}")
+                        break
+                    
+                    for row in rows:
                         try:
-                            timestamp = datetime.strptime(timestamp_str, "%d %b %Y %H:%M")
-                                
-                            # If we have a newest date and this item is older, we can stop
-                            if newest_date and timestamp < newest_date:
+                            # The title and archive URL are in the first link in the TEXT-BLOCK
+                            text_block = row.select_one(".TEXT-BLOCK")
+                            if not text_block:
                                 continue
                                 
-                            found_new_items = True
+                            archive_link = text_block.select_one("a[href^='https://archive.ph/']")
+                            if not archive_link:
+                                continue
                                 
-                            results.append((original_url, archive_url, timestamp))
-                        except ValueError:
-                            logger.warning(f"Could not parse timestamp: {timestamp_str}")
-                    except Exception as e:
-                        logger.error(f"Error parsing archive item: {e}")
-                
-                # Move to the next page
-                offset += 20
-                time.sleep(2)  # Be nice to the server
+                            archive_url = archive_link.get('href')
+                            
+                            # The original URL is in the second link
+                            original_link = text_block.select("a")[1] if len(text_block.select("a")) > 1 else None
+                            if not original_link:
+                                continue
+                                
+                            original_url = original_link.get('href').replace('https://archive.ph/https://', 'https://')
+                            
+                            # Skip non-indafoto.hu URLs
+                            if "indafoto.hu" not in original_url:
+                                continue
+                                
+                            # The timestamp is in the THUMBS-BLOCK
+                            thumbs_block = row.select_one(".THUMBS-BLOCK")
+                            if not thumbs_block:
+                                continue
+                                
+                            timestamp_div = thumbs_block.select_one("div[style*='white-space:nowrap']")
+                            if not timestamp_div:
+                                continue
+                                
+                            timestamp_str = timestamp_div.get_text().strip()
+                                
+                            # Parse the timestamp (format: "22 Mar 2025 21:00")
+                            try:
+                                timestamp = datetime.strptime(timestamp_str, "%d %b %Y %H:%M")
+                                    
+                                # If we have a newest date and this item is older, we can stop
+                                if newest_date and timestamp < newest_date:
+                                    continue
+                                    
+                                found_new_items = True
+                                    
+                                results.append((original_url, archive_url, timestamp))
+                            except ValueError:
+                                logger.warning(f"Could not parse timestamp: {timestamp_str}")
+                        except Exception as e:
+                            logger.error(f"Error parsing archive item: {e}")
+                    
+                    # Move to the next page
+                    offset += 20
+                    time.sleep(3)  # Increased sleep time to be more respectful to the server
+                except Exception as e:
+                    logger.error(f"Error processing archive.ph page {page+1}: {e}")
+                    break
                 
         except Exception as e:
             logger.error(f"Error fetching archive.ph listings: {e}")
@@ -403,6 +417,62 @@ class ArchiveSubmitter:
             logger.error(f"Failed to submit to archive.ph: {url} - {e}")
             return False
 
+    def fetch_author_archives(self, author_url):
+        """
+        Fetch archives specifically for a given author from both archive services.
+        This extracts the author username from the URL and searches for specific patterns.
+        
+        Args:
+            author_url: The full author URL (e.g., 'https://indafoto.hu/felsmann')
+            
+        Returns:
+            Number of archived entries found and added to the database
+        """
+        total_updated = 0
+        try:
+            # Extract author username from URL
+            author_match = re.search(r'indafoto\.hu/([^/]+)', author_url)
+            if not author_match:
+                logger.error(f"Could not extract author username from URL: {author_url}")
+                return 0
+                
+            author_username = author_match.group(1)
+            logger.info(f"Fetching archives for author: {author_username}")
+            
+            # Fetch from archive.ph with author-specific pattern
+            # For archive.ph, we need to search with the pattern in the right format
+            # Limit to 5 pages to avoid rate limiting (429 errors)
+            ph_listings = self.fetch_archive_ph_listings(domain=f"indafoto.hu/{author_username}", max_pages=5)
+            logger.info(f"Found {len(ph_listings)} archive.ph listings for author {author_username}")
+            
+            # Update database with the listings
+            for original_url, archive_url, timestamp in ph_listings:
+                try:
+                    self.update_archive_from_listing(original_url, archive_url, 'archive.ph', timestamp)
+                    total_updated += 1
+                except Exception as e:
+                    logger.error(f"Error updating listing for {original_url}: {e}")
+                
+            # Fetch from archive.org with author-specific pattern
+            org_url = f"indafoto.hu/{author_username}"
+            org_listings = self.fetch_archive_org_listings(domain=org_url)
+            logger.info(f"Found {len(org_listings)} archive.org listings for author {author_username}")
+            
+            # Update database with the listings
+            for original_url, archive_url, timestamp in org_listings:
+                try:
+                    self.update_archive_from_listing(original_url, archive_url, 'archive.org', timestamp)
+                    total_updated += 1
+                except Exception as e:
+                    logger.error(f"Error updating listing for {original_url}: {e}")
+                
+            logger.info(f"Updated {total_updated} archive entries for author {author_username}")
+                
+        except Exception as e:
+            logger.error(f"Error fetching author archives for {author_url}: {e}")
+            
+        return total_updated
+
     def process_pending_authors(self):
         """Find and submit author pages that haven't been archived."""
         try:
@@ -423,6 +493,10 @@ class ArchiveSubmitter:
             logger.info(f"Found {len(author_urls)} unarchived author pages")
             
             for (author_url,) in author_urls:
+                # First, try to fetch existing archives for this author
+                archives_found = self.fetch_author_archives(author_url)
+                logger.info(f"Found and added {archives_found} existing archives for {author_url}")
+                
                 # Check if already in archive.org
                 archived_org, archive_org_url = self.check_archive_org(author_url)
                 archived_ph, archive_ph_url = self.check_archive_ph(author_url)
@@ -559,23 +633,14 @@ class ArchiveSubmitter:
     def update_submission_status(self, url, status, service=None, archive_url=None):
         """Update or insert archive submission status."""
         try:
+            # First check if a record already exists
             self.cursor.execute("""
-                INSERT INTO archive_submissions (url, submission_date, status, archive_url, archive_service)
-                VALUES (?, datetime('now'), ?, ?, ?)
-                ON CONFLICT(url, archive_service) DO UPDATE SET
-                    status = excluded.status,
-                    archive_url = COALESCE(excluded.archive_url, archive_submissions.archive_url),
-                    last_attempt = datetime('now')
-            """, (url, status, archive_url, service))
-            self.conn.commit()
-        except sqlite3.IntegrityError:
-            # If we have a constraint error, we need to try again with a more specific approach
-            # This can happen if the unique constraint is on URL only
-            self.cursor.execute("""
-                SELECT id FROM archive_submissions WHERE url = ? AND archive_service = ?
+                SELECT id FROM archive_submissions 
+                WHERE url = ? AND archive_service = ?
             """, (url, service))
             
             existing_id = self.cursor.fetchone()
+            
             if existing_id:
                 # Update existing record
                 self.cursor.execute("""
