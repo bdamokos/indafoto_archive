@@ -502,16 +502,45 @@ def get_image_links(search_page_url, attempt=1, session=None):
     try:
         logger.info(f"Attempting to fetch URL: {search_page_url} (attempt {attempt})")
         timeout = BASE_TIMEOUT * attempt  # Progressive timeout
-        if session:
-            response = session.get(search_page_url, timeout=timeout)
-        else:
-            # Create a new session with HTTP/2 support
-            temp_session = create_session(max_retries=attempt)
-            response = temp_session.get(
-                search_page_url,
-                timeout=timeout,
-                allow_redirects=True
-            )
+        
+        # Special handling for 408 errors - always create a fresh session
+        if attempt > 1:
+            logger.info("Creating fresh session for retry attempt")
+            if session:
+                try:
+                    session.close()  # Close old session if it exists
+                except:
+                    pass
+            # Create completely new session with fresh connection pool
+            session = create_session(max_retries=attempt)
+            # Configure the adapter to not retry on 408 specifically
+            for protocol in ['http://', 'https://']:
+                adapter = session.adapters[protocol]
+                # Get the current retry configuration
+                retries = adapter.max_retries
+                # Create a new Retry instance with 408 removed from status_forcelist
+                if 408 in retries.status_forcelist:
+                    status_forcelist = set(retries.status_forcelist)
+                    status_forcelist.remove(408)
+                    adapter.max_retries = requests.adapters.Retry(
+                        total=retries.total,
+                        connect=retries.connect,
+                        read=retries.read,
+                        redirect=retries.redirect,
+                        status=retries.status,
+                        other=retries.other,
+                        backoff_factor=retries.backoff_factor,
+                        status_forcelist=list(status_forcelist),
+                        allowed_methods=retries.allowed_methods
+                    )
+        elif not session:
+            session = create_session(max_retries=attempt)
+            
+        response = session.get(
+            search_page_url,
+            timeout=timeout,
+            allow_redirects=True
+        )
         
         # Log response details
         logger.info(f"Response status code: {response.status_code}")
@@ -521,26 +550,43 @@ def get_image_links(search_page_url, attempt=1, session=None):
         if response.status_code in [408, 429, 500, 502, 503, 504, 507, 508, 509]:
             error_msg = f"Error ({response.status_code}) for {search_page_url}"
             logger.error(error_msg)
-            # Determine backoff time based on error code and attempt number
-            if response.status_code == 408:  # Request Timeout
+            
+            # Close the response and session for 408 errors
+            if response.status_code == 408:
+                response.close()
+                try:
+                    session.close()
+                except:
+                    pass
+                    
+                # Determine backoff time based on attempt number
                 backoff_time = min(30 * attempt, 300)  # Max 5 minutes
                 logger.info(f"Request Timeout (408), backing off for {backoff_time} seconds")
                 time.sleep(backoff_time)
+                
+                # If this is not the final attempt, retry with a fresh session
+                if attempt < 3:  # Max 3 attempts
+                    logger.info(f"Retrying {search_page_url} with fresh session (attempt {attempt + 1})")
+                    return get_image_links(search_page_url, attempt=attempt + 1, session=None)
             elif response.status_code == 429:  # Too Many Requests
                 backoff_time = min(60 * attempt, 600)  # Max 10 minutes
                 logger.info(f"Rate limited (429), backing off for {backoff_time} seconds")
                 time.sleep(backoff_time)
-            
-            # If this is not the final attempt, retry recursively with increased attempt count
-            if attempt < 3:  # Max 3 attempts
-                logger.info(f"Retrying {search_page_url} (attempt {attempt + 1})")
-                return get_image_links(search_page_url, attempt=attempt + 1, session=session)
+                
+                # If this is not the final attempt, retry recursively with increased attempt count
+                if attempt < 3:
+                    logger.info(f"Retrying {search_page_url} (attempt {attempt + 1})")
+                    return get_image_links(search_page_url, attempt=attempt + 1, session=session)
             
             # If all retries failed, raise the exception to be handled by the caller
             raise requests.exceptions.HTTPError(f"Server Error ({response.status_code})")
         
         response.raise_for_status()
         
+        # Clear any stored error state on success
+        if hasattr(session, '_last_error'):
+            delattr(session, '_last_error')
+            
         soup = BeautifulSoup(response.text, "html.parser")
         image_data = []
         
@@ -591,7 +637,8 @@ def get_image_links(search_page_url, attempt=1, session=None):
             backoff_time = 30 * attempt  # Progressive backoff
             logger.info(f"Backing off for {backoff_time} seconds before retrying")
             time.sleep(backoff_time)
-            return get_image_links(search_page_url, attempt=attempt + 1, session=session)
+            # Create fresh session for timeout retries
+            return get_image_links(search_page_url, attempt=attempt + 1, session=None)
         return []
     except requests.RequestException as e:
         logger.error(f"Failed to fetch {search_page_url}: {e}")
@@ -599,6 +646,13 @@ def get_image_links(search_page_url, attempt=1, session=None):
     except Exception as e:
         logger.error(f"Unexpected error while processing {search_page_url}: {e}")
         return []
+    finally:
+        # Always try to close the response if it exists
+        if 'response' in locals():
+            try:
+                response.close()
+            except:
+                pass
 
 def parse_hungarian_date(date_str):
     """Parse a date string in Hungarian format with optional time."""
