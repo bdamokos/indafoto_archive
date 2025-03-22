@@ -633,30 +633,56 @@ class ArchiveSubmitter:
     def update_submission_status(self, url, status, service=None, archive_url=None):
         """Update or insert archive submission status."""
         try:
-            # First check if a record already exists
+            # First check if we have existing records for this URL
             self.cursor.execute("""
-                SELECT id FROM archive_submissions 
-                WHERE url = ? AND archive_service = ?
-            """, (url, service))
+                SELECT id, archive_service 
+                FROM archive_submissions 
+                WHERE url = ?
+            """, (url,))
             
-            existing_id = self.cursor.fetchone()
+            existing_records = self.cursor.fetchall()
             
-            if existing_id:
+            # Check if we have an exact match for the URL+service combination
+            matching_id = None
+            for record_id, record_service in existing_records:
+                if record_service == service or (record_service is None and service is not None):
+                    matching_id = record_id
+                    break
+            
+            if matching_id:
                 # Update existing record
+                logger.info(f"Updating existing record for {url} with service {service}")
                 self.cursor.execute("""
                     UPDATE archive_submissions
                     SET status = ?,
+                        archive_service = ?,
                         archive_url = COALESCE(?, archive_url),
                         last_attempt = datetime('now')
                     WHERE id = ?
-                """, (status, archive_url, existing_id[0]))
+                """, (status, service, archive_url, matching_id))
             else:
-                # Insert new record
-                self.cursor.execute("""
-                    INSERT INTO archive_submissions 
-                    (url, submission_date, status, archive_url, archive_service, retry_count)
-                    VALUES (?, datetime('now'), ?, ?, ?, 0)
-                """, (url, status, archive_url, service))
+                # Check if we need to handle old records with NULL service but same URL
+                if existing_records and service is not None:
+                    # Update the first record to use this service
+                    first_id = existing_records[0][0]
+                    logger.info(f"Updating legacy record {first_id} for {url} with service {service}")
+                    self.cursor.execute("""
+                        UPDATE archive_submissions
+                        SET status = ?,
+                            archive_service = ?,
+                            archive_url = COALESCE(?, archive_url),
+                            last_attempt = datetime('now')
+                        WHERE id = ?
+                    """, (status, service, archive_url, first_id))
+                else:
+                    # Insert new record
+                    logger.info(f"Inserting new record for {url} with service {service}")
+                    self.cursor.execute("""
+                        INSERT INTO archive_submissions 
+                        (url, submission_date, status, archive_url, archive_service, retry_count)
+                        VALUES (?, datetime('now'), ?, ?, ?, 0)
+                    """, (url, status, archive_url, service))
+            
             self.conn.commit()
         except Exception as e:
             logger.error(f"Error updating submission status for {url}: {e}")
