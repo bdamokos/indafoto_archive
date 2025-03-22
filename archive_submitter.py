@@ -771,12 +771,10 @@ class ArchiveSubmitter:
                 SELECT DISTINCT i.page_url, i.author_url
                 FROM images i
                 JOIN marked_images m ON i.id = m.image_id
-                LEFT JOIN (
-                    SELECT url, MAX(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as is_archived
-                    FROM archive_submissions
-                    GROUP BY url
-                ) a ON i.page_url = a.url
-                WHERE a.url IS NULL OR a.is_archived = 0
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM archive_submissions
+                    WHERE url = i.page_url AND status = 'success'
+                )
             """)
             
             marked_images = self.cursor.fetchall()
@@ -844,14 +842,15 @@ class ArchiveSubmitter:
                     SELECT 
                         i.author,
                         COUNT(*) as total_images,
-                        SUM(CASE WHEN a.is_archived > 0 THEN 1 ELSE 0 END) as archived_images,
-                        COUNT(*) - SUM(CASE WHEN a.is_archived > 0 THEN 1 ELSE 0 END) as unarchived_count
+                        SUM(CASE WHEN EXISTS (
+                            SELECT 1 FROM archive_submissions 
+                            WHERE url = i.page_url AND status = 'success'
+                        ) THEN 1 ELSE 0 END) as archived_images,
+                        COUNT(*) - SUM(CASE WHEN EXISTS (
+                            SELECT 1 FROM archive_submissions 
+                            WHERE url = i.page_url AND status = 'success'
+                        ) THEN 1 ELSE 0 END) as unarchived_count
                     FROM images i
-                    LEFT JOIN (
-                        SELECT url, MAX(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as is_archived
-                        FROM archive_submissions
-                        GROUP BY url
-                    ) a ON i.page_url = a.url
                     GROUP BY i.author
                 )
                 SELECT 
@@ -884,13 +883,11 @@ class ArchiveSubmitter:
             self.cursor.execute("""
                 SELECT i.page_url, i.author_url
                 FROM images i
-                LEFT JOIN (
-                    SELECT url, MAX(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as is_archived
-                    FROM archive_submissions
-                    GROUP BY url
-                ) a ON i.page_url = a.url
                 WHERE i.author = ? 
-                AND (a.url IS NULL OR a.is_archived = 0)
+                AND NOT EXISTS (
+                    SELECT 1 FROM archive_submissions
+                    WHERE url = i.page_url AND status = 'success'
+                )
                 ORDER BY RANDOM()
                 LIMIT 60
             """, (author_name,))
@@ -918,7 +915,7 @@ class ArchiveSubmitter:
                         logger.info(f"Submitted favorite author image to archive.ph: {page_url}")
                         self.update_submission_status(page_url, 'pending', 'archive.ph')
                 
-                time.sleep(5)  # Rate limiting
+                time.sleep(2)  # Rate limiting
                     
         except Exception as e:
             logger.error(f"Error processing favorite authors: {e}")

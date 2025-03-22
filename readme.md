@@ -406,10 +406,25 @@ The Archive Submitter runs as a background service and uses these configuration 
 | `CHECK_INTERVAL` | Time between full cycles (seconds) | 10 | Edit constant in script |
 | `TASK_INTERVAL` | Time between different tasks (seconds) | 5 | Edit constant in script |
 
+Command line arguments:
+
+| Argument | Description | Example |
+|----------|-------------|---------|
+| `--no-update-check` | Skip checking for updates | `--no-update-check` |
+| `--fetch-archived` | Only fetch existing archives without submitting new pages | `--fetch-archived` |
+| `--fetch-author NAME` | Fetch archives for a specific author username | `--fetch-author "john_doe"` |
+| `--verbose` | Enable verbose logging | `--verbose` |
+
 Example usage:
 ```bash
 # Start the archive submitter service
 python archive_submitter.py
+
+# Fetch existing archives for a specific author
+python archive_submitter.py --fetch-author "john_doe" --verbose
+
+# Only fetch existing archives without submitting new pages
+python archive_submitter.py --fetch-archived
 ```
 
 #### redownload_missing.py (Recovery Tool)
