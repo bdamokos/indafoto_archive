@@ -355,20 +355,24 @@ If problems persist, please report the issue with the error message from the log
 
 #### indafoto.py (Main Crawler)
 
-| Argument | Description | Default | Example |
-|----------|-------------|---------|---------|
-| `--start-offset N` | Start crawling from page N | 0 | `--start-offset 100` |
-| `--retry` | Retry previously failed pages | False | `--retry` |
-| `--test` | Run test function for album extraction | False | `--test` |
-| `--test-tags` | Run tag extraction test | False | `--test-tags` |
-| `--test-camera` | Run camera make/model extraction test | False | `--test-camera` |
-| `--workers N` | Set number of parallel download workers | 8 | `--workers 4` |
-| `--redownload-author NAME` | Redownload all images from a specific author | None | `--redownload-author "john_doe"` |
-| `--ban-author NAME` | Add an author to the banned list (requires --ban-reason) | None | `--ban-author "spammer" --ban-reason "spam content"` |
-| `--ban-reason REASON` | Specify reason when banning an author | None | `--ban-author "spammer" --ban-reason "spam content"` |
-| `--unban-author NAME` | Remove an author from the banned list | None | `--unban-author "john_doe"` |
-| `--cleanup-banned NAME` | Clean up all content from a banned author | None | `--cleanup-banned "spammer"` |
-| `--no-update-check` | Skip checking for updates | False | `--no-update-check` |
+| Category | Argument | Description | Default | Example |
+|----------|----------|-------------|---------|---------|
+| **Core Options** |
+| | `--start-offset N` | Start crawling from page N | 0 | `--start-offset 100` |
+| | `--retry` | Retry previously failed pages | False | `--retry` |
+| | `--workers N` | Set number of parallel download workers | 8 | `--workers 4` |
+| | `--auto-restart` | Enable automatic restart every 24 hours | False | `--auto-restart` |
+| | `--no-update-check` | Skip checking for updates | False | `--no-update-check` |
+| **Author Management** |
+| | `--redownload-author NAME` | Redownload all images from a specific author | None | `--redownload-author "john_doe"` |
+| | `--ban-author NAME` | Add an author to the banned list (requires --ban-reason) | None | `--ban-author "spammer" --ban-reason "spam content"` |
+| | `--ban-reason REASON` | Specify reason when banning an author | None | `--ban-author "spammer" --ban-reason "spam content"` |
+| | `--unban-author NAME` | Remove an author from the banned list | None | `--unban-author "john_doe"` |
+| | `--cleanup-banned NAME` | Clean up all content from a banned author | None | `--cleanup-banned "spammer"` |
+| **Testing** |
+| | `--test` | Run test function for album extraction | False | `--test` |
+| | `--test-tags` | Run tag extraction test | False | `--test-tags` |
+| | `--test-camera` | Run camera make/model extraction test | False | `--test-camera` |
 
 #### indafoto_archive_explorer.py (Web Interface)
 
