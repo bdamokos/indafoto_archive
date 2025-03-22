@@ -17,7 +17,8 @@ import signal
 import sys
 import re
 from urllib.parse import unquote
-from indafoto import init_db as indafoto_init_db, get_banned_authors, ban_author, unban_author, cleanup_banned_author_content
+import argparse
+from indafoto import init_db as indafoto_init_db, get_banned_authors, ban_author, unban_author, cleanup_banned_author_content, check_for_updates
 
 # Configure logging
 logging.basicConfig(
@@ -1168,21 +1169,36 @@ def signal_handler(signum, frame):
     sys.exit(0)
 
 if __name__ == '__main__':
-    # Create and configure the application
-    app = create_app()
-    
-    # Register cleanup handler
-    import atexit
-    
-    
-    # Register signal handlers
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Indafoto Archive Explorer')
+    parser.add_argument('--no-update-check', action='store_true',
+                       help='Skip checking for updates')
+    parser.add_argument('--port', type=int, default=5001,
+                       help='Port to run the web server on')
+    parser.add_argument('--host', default='0.0.0.0',
+                       help='Host to run the web server on')
+    parser.add_argument('--debug', action='store_true',
+                       help='Run Flask in debug mode')
+    args = parser.parse_args()
     
     try:
-        # Start the Flask development server on port 5001
-        logger.info("Starting Flask server on port 5001...")
-        app.run(debug=False, host='0.0.0.0', port=5001)
+        # Check for updates unless explicitly disabled
+        if not args.no_update_check:
+            check_for_updates(__file__)
+            
+        # Create and configure the application
+        app = create_app()
+        
+        # Register cleanup handler
+        import atexit
+        
+        # Register signal handlers
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        # Start the Flask development server
+        logger.info(f"Starting Flask server on {args.host}:{args.port}...")
+        app.run(debug=args.debug, host=args.host, port=args.port)
     except Exception as e:
         logger.error(f"Failed to start server: {e}")
         sys.exit(1)

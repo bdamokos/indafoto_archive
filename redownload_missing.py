@@ -7,9 +7,10 @@ It uses the indafoto.py script to download the images and extract metadata.
 
 import sqlite3
 import logging
-from indafoto import download_image, extract_metadata, create_session
+from indafoto import download_image, extract_metadata, create_session, check_for_updates
 import os
 from tqdm import tqdm
+import argparse
 
 # Configure logging
 logging.basicConfig(
@@ -99,7 +100,16 @@ def redownload_missing_images():
     conn.close()
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Indafoto Missing Files Recovery Tool')
+    parser.add_argument('--no-update-check', action='store_true',
+                       help='Skip checking for updates')
+    args = parser.parse_args()
+    
     try:
+        # Check for updates unless explicitly disabled
+        if not args.no_update_check:
+            check_for_updates(__file__)
+            
         redownload_missing_images()
     except Exception as e:
         logger.error(f"Unexpected error: {e}", exc_info=True) 
