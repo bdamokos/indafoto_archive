@@ -1,26 +1,33 @@
-import os
-import niquests as requests
-import sqlite3
-import time
-import logging
-from tqdm import tqdm
-from bs4 import BeautifulSoup
-from urllib.parse import unquote, urlparse
-import re
-from datetime import datetime
-import threading
-import queue
-import argparse
-import hashlib
-import shutil
-from pathlib import Path
-import portalocker
-import json
-import sys
-import subprocess
-import signal
-import atexit
-from io import BytesIO
+try:
+    import os
+    import niquests as requests
+    import sqlite3
+    import time
+    import logging
+    from tqdm import tqdm
+    from bs4 import BeautifulSoup
+    from urllib.parse import unquote, urlparse
+    import re
+    from datetime import datetime
+    import threading
+    import queue
+    import argparse
+    import hashlib
+    import shutil
+    from pathlib import Path
+    import portalocker
+    import json
+    import sys
+    import subprocess
+    import signal
+    import atexit
+    from io import BytesIO
+    import psutil
+except ImportError as e:
+    print(f"Error importing required modules: {e}")
+    print("Please install the required modules using the requirements.txt file:\n")
+    print("pip install -r requirements.txt")
+    sys.exit(1)
 
 def check_for_updates(filename=None):
     """Check if there's a newer version of the script available on GitHub.
@@ -112,21 +119,44 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Add restart configuration
+
 RESTART_INTERVAL = 3600*24 # 24 hours in seconds
 last_restart_time = time.time()
 restart_timer = None
 should_restart = False
 
-def restart_script():
-    """Restart the script while preserving the current state."""
-    global should_restart
-    if not args.auto_restart:
-        logger.info("Auto-restart is disabled, continuing without restart")
-        return
+restart_lock = threading.Lock()
+restart_in_progress = False
+
+def restart_script(error_restart=False):
+    """Restart the script while preserving the current state.
+    
+    Args:
+        error_restart: If True, restart regardless of auto-restart setting (for error handling)
+    """
+    global should_restart, restart_timer, args, restart_in_progress
+    
+    # Use the lock to ensure only one thread can attempt restart
+    with restart_lock:
+        # Check if restart is already in progress
+        if restart_in_progress:
+            logger.info("Restart already in progress, skipping additional restart attempt")
+            return
+            
+        if not error_restart and not args.auto_restart:
+            logger.info("Auto-restart is disabled, continuing without restart")
+            return
+            
+        # Set the flag to prevent other threads from initiating restart
+        restart_in_progress = True
         
     should_restart = True
-    logger.info("Initiating script restart...")
+    restart_type = "error-based" if error_restart else "time-based"
+    logger.info(f"Initiating {restart_type} script restart...")
+    
+    # Cancel the restart timer if it exists
+    if restart_timer:
+        restart_timer.cancel()
     
     # Get the current page number from the database
     conn = sqlite3.connect(DB_FILE)
@@ -146,7 +176,7 @@ def restart_script():
         conn.close()
     
     # Prepare the command with the same arguments
-    cmd = [sys.executable] + sys.argv
+    cmd = [str(Path(sys.executable))] + sys.argv
     # Update or add the start-offset argument
     start_offset_found = False
     for i, arg in enumerate(cmd):
@@ -157,15 +187,66 @@ def restart_script():
     if not start_offset_found:
         cmd.extend(['--start-offset', str(next_page)])
     
-    # Start the new process
+    # Clean up all threads and processes
     try:
-        subprocess.Popen(cmd)
+        # Stop all thread pools if they exist
+        global metadata_pool, download_pool, validation_pool
+        if 'metadata_pool' in globals() and metadata_pool is not None:
+            metadata_pool.shutdown()
+        if 'download_pool' in globals() and download_pool is not None:
+            download_pool.shutdown()
+        if 'validation_pool' in globals() and validation_pool is not None:
+            validation_pool.shutdown()
+        
+        # Close all database connections
+        try:
+            if 'conn' in locals():
+                conn.close()
+        except:
+            pass
+        
+        # Kill all child processes
+        current_process = psutil.Process()
+        children = current_process.children(recursive=True)
+        for child in children:
+            try:
+                child.terminate()
+            except:
+                pass
+        
+        # Give them some time to terminate gracefully
+        _, alive = psutil.wait_procs(children, timeout=3)
+        
+        # Force kill if still alive
+        for p in alive:
+            try:
+                p.kill()
+            except:
+                pass
+                
+        logger.info("Successfully cleaned up all threads and processes")
+        
+        # Start the new process with platform-appropriate creation flags
+        creation_flags = 0
+        if sys.platform == 'win32':
+            creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
+        
+        subprocess.Popen(cmd, creationflags=creation_flags if sys.platform == 'win32' else 0)
         logger.info("New process started successfully")
-    except Exception as e:
-        logger.error(f"Failed to start new process: {e}")
-    
-    # Exit the current process
-    sys.exit(0)
+        
+        # Exit the current process
+        os._exit(0)  # Use os._exit() to ensure immediate termination
+        
+    except Exception as cleanup_error:
+        logger.error(f"Error during cleanup: {cleanup_error}")
+        # Still try to start new process and exit
+        try:
+            subprocess.Popen(cmd, creationflags=creation_flags if sys.platform == 'win32' else 0)
+            logger.info("New process started successfully despite cleanup errors")
+        finally:
+            # Reset restart flag in case exit fails
+            restart_in_progress = False
+            os._exit(0)  # Ensure we exit even if new process start fails
 
 def check_restart_timer():
     """Check if it's time to restart the script."""
@@ -1011,8 +1092,14 @@ def extract_metadata(photo_page_url, attempt=1, session=None):
     except requests.exceptions.HTTPError as e:
         status_code = e.response.status_code
         
+        # Handle 408 errors with restart
+        if status_code == 408:
+            logger.warning(f"Request timeout (408) for {photo_page_url}, triggering error-based restart")
+            restart_script(error_restart=True)
+            return None
+            
         # Temporary server errors - retry with backoff
-        if status_code in [408, 500, 502, 503, 504] and attempt < 3:
+        if status_code in [500, 502, 503, 504] and attempt < 3:
             backoff_time = min(2.408 * attempt, 240)
             logger.warning(f"Server error {status_code} for {photo_page_url}, backing off for {backoff_time}s")
             time.sleep(backoff_time)
@@ -1300,6 +1387,7 @@ class ThreadPool:
         self.threads = []
         self.running = True
         self.name = name
+        self.shutdown_event = threading.Event()
         
         # Create worker threads
         for i in range(num_threads):
@@ -1310,7 +1398,7 @@ class ThreadPool:
     
     def _worker(self):
         """Worker thread that processes tasks from the queue."""
-        while self.running:
+        while self.running and not self.shutdown_event.is_set():
             try:
                 task = self.tasks.get(timeout=1)  # 1 second timeout to check running flag
                 if task is None:  # Poison pill
@@ -1334,7 +1422,8 @@ class ThreadPool:
     
     def add_task(self, func, *args):
         """Add a task to the pool."""
-        self.tasks.put((func, args))
+        if not self.shutdown_event.is_set():
+            self.tasks.put((func, args))
     
     def wait_completion(self):
         """Wait for all tasks to complete."""
@@ -1343,12 +1432,38 @@ class ThreadPool:
     def shutdown(self):
         """Shutdown the thread pool."""
         self.running = False
+        self.shutdown_event.set()
+        
+        # Clear the task queue
+        try:
+            while True:
+                self.tasks.get_nowait()
+                self.tasks.task_done()
+        except queue.Empty:
+            pass
+        
         # Add poison pills for each thread
         for _ in self.threads:
             self.tasks.put(None)
-        # Wait for all threads to complete
+            
+        # Wait for all threads to complete with timeout
         for thread in self.threads:
-            thread.join(timeout=5)
+            thread.join(timeout=2)
+            
+        # Force clear the results and errors queues
+        try:
+            while True:
+                self.results.get_nowait()
+                self.results.task_done()
+        except queue.Empty:
+            pass
+            
+        try:
+            while True:
+                self.errors.get_nowait()
+                self.errors.task_done()
+        except queue.Empty:
+            pass
 
 def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
     """Process a list of images and save them to the database."""
