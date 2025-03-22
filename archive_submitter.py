@@ -676,40 +676,53 @@ class ArchiveSubmitter:
             """)
             
             for author, total_images, archived_images in self.cursor.fetchall():
-                archived_images = archived_images or 0
-                target_archives = int(total_images * ARCHIVE_SAMPLE_RATE)
-                
-                if archived_images < target_archives:
-                    # Get unarchived images for this author
-                    self.cursor.execute("""
-                        SELECT i.page_url
-                        FROM images i
-                        LEFT JOIN (
-                            SELECT url, MAX(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as is_archived
-                            FROM archive_submissions
-                            GROUP BY url
-                        ) a ON i.page_url = a.url
-                        WHERE i.author = ? AND (a.url IS NULL OR a.is_archived = 0)
-                        ORDER BY RANDOM()
-                        LIMIT ?
-                    """, (author, target_archives - archived_images))
+                try:
+                    archived_images = archived_images or 0
+                    target_archives = int(total_images * ARCHIVE_SAMPLE_RATE)
                     
-                    for (page_url,) in self.cursor.fetchall():
-                        # Check current archive status
-                        archived_org, _ = self.check_archive_org(page_url)
-                        archived_ph, _ = self.check_archive_ph(page_url)
+                    if archived_images < target_archives:
+                        # Get unarchived images for this author
+                        self.cursor.execute("""
+                            SELECT i.page_url
+                            FROM images i
+                            LEFT JOIN (
+                                SELECT url, MAX(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as is_archived
+                                FROM archive_submissions
+                                GROUP BY url
+                            ) a ON i.page_url = a.url
+                            WHERE i.author = ? AND (a.url IS NULL OR a.is_archived = 0)
+                            ORDER BY RANDOM()
+                            LIMIT ?
+                        """, (author, target_archives - archived_images))
                         
-                        if not archived_org:
-                            if self.submit_to_archive_org(page_url):
-                                logger.info(f"Submitted image to archive.org: {page_url}")
-                                self.update_submission_status(page_url, 'pending', 'archive.org')
-                        
-                        if not archived_ph:
-                            if self.submit_to_archive_ph(page_url):
-                                logger.info(f"Submitted image to archive.ph: {page_url}")
-                                self.update_submission_status(page_url, 'pending', 'archive.ph')
-                        
-                        time.sleep(2.5)  # Rate limiting
+                        for (page_url,) in self.cursor.fetchall():
+                            try:
+                                # Check current archive status
+                                archived_org, _ = self.check_archive_org(page_url)
+                                archived_ph, _ = self.check_archive_ph(page_url)
+                                
+                                if not archived_org:
+                                    try:
+                                        if self.submit_to_archive_org(page_url):
+                                            logger.info(f"Submitted image to archive.org: {page_url}")
+                                            self.update_submission_status(page_url, 'pending', 'archive.org')
+                                    except Exception as org_e:
+                                        logger.error(f"Error submitting to archive.org for {page_url}: {org_e}")
+                                
+                                if not archived_ph:
+                                    try:
+                                        if self.submit_to_archive_ph(page_url):
+                                            logger.info(f"Submitted image to archive.ph: {page_url}")
+                                            self.update_submission_status(page_url, 'pending', 'archive.ph')
+                                    except Exception as ph_e:
+                                        logger.error(f"Error submitting to archive.ph for {page_url}: {ph_e}")
+                                
+                                time.sleep(2.5)  # Rate limiting
+                            except Exception as img_e:
+                                logger.error(f"Error processing image {page_url}: {img_e}")
+                                time.sleep(2.5)  # Continue to the next image
+                except Exception as author_e:
+                    logger.error(f"Error processing author {author}: {author_e}")
 
         except Exception as e:
             logger.error(f"Error processing pending images: {e}")
@@ -757,23 +770,14 @@ class ArchiveSubmitter:
     def update_submission_status(self, url, status, service=None, archive_url=None):
         """Update or insert archive submission status."""
         try:
+            # First check if record exists with this URL and service
             self.cursor.execute("""
-                INSERT INTO archive_submissions (url, submission_date, status, archive_url, archive_service)
-                VALUES (?, datetime('now'), ?, ?, ?)
-                ON CONFLICT(url, archive_service) DO UPDATE SET
-                    status = excluded.status,
-                    archive_url = COALESCE(excluded.archive_url, archive_submissions.archive_url),
-                    last_attempt = datetime('now')
-            """, (url, status, archive_url, service))
-            self.conn.commit()
-        except sqlite3.IntegrityError:
-            # If we have a constraint error, we need to try again with a more specific approach
-            # This can happen if the unique constraint is on URL only
-            self.cursor.execute("""
-                SELECT id FROM archive_submissions WHERE url = ? AND archive_service = ?
+                SELECT id FROM archive_submissions 
+                WHERE url = ? AND archive_service = ?
             """, (url, service))
             
             existing_id = self.cursor.fetchone()
+            
             if existing_id:
                 # Update existing record
                 self.cursor.execute("""
@@ -787,12 +791,29 @@ class ArchiveSubmitter:
                 # Insert new record
                 self.cursor.execute("""
                     INSERT INTO archive_submissions 
-                    (url, submission_date, status, archive_url, archive_service, retry_count)
-                    VALUES (?, datetime('now'), ?, ?, ?, 0)
-                """, (url, status, archive_url, service))
+                    (url, submission_date, status, archive_url, archive_service, retry_count, is_archived)
+                    VALUES (?, datetime('now'), ?, ?, ?, 0, CASE WHEN ? = 'success' THEN 1 ELSE 0 END)
+                """, (url, status, archive_url, service, status))
+            
             self.conn.commit()
+        except sqlite3.IntegrityError as e:
+            logger.warning(f"SQLite integrity error when updating {url} for {service}: {e}")
+            # Try one more time with a direct approach
+            try:
+                self.cursor.execute("""
+                    UPDATE archive_submissions
+                    SET status = ?,
+                        archive_url = COALESCE(?, archive_url),
+                        last_attempt = datetime('now')
+                    WHERE url = ? AND archive_service = ?
+                """, (status, archive_url, url, service))
+                self.conn.commit()
+                logger.info(f"Successfully updated existing record for {url} on {service}")
+            except Exception as inner_e:
+                logger.error(f"Final error updating submission for {url} on {service}: {inner_e}")
+                self.conn.rollback()
         except Exception as e:
-            logger.error(f"Error updating submission status for {url}: {e}")
+            logger.error(f"Error updating submission status for {url} on {service}: {e}")
             self.conn.rollback()
 
     def process_marked_images(self):
@@ -813,54 +834,67 @@ class ArchiveSubmitter:
             logger.info(f"Found {len(marked_images)} unarchived marked images")
             
             for page_url, author_url in marked_images:
-                # Check if already in archive.org
-                archived_org, archive_org_url = self.check_archive_org(page_url)
-                archived_ph, archive_ph_url = self.check_archive_ph(page_url)
-                
-                # Submit to archive.org if needed
-                if not archived_org:
-                    if self.submit_to_archive_org(page_url):
-                        logger.info(f"Submitted marked image to archive.org: {page_url}")
-                        self.update_submission_status(page_url, 'pending', 'archive.org')
-                
-                # Submit to archive.ph if needed
-                if not archived_ph:
-                    if self.submit_to_archive_ph(page_url):
-                        logger.info(f"Submitted marked image to archive.ph: {page_url}")
-                        self.update_submission_status(page_url, 'pending', 'archive.ph')
-                
-                # Also submit author page if available
-                if author_url:
-                    # Check author page
-                    archived_org_author, _ = self.check_archive_org(author_url)
-                    archived_ph_author, _ = self.check_archive_ph(author_url)
+                try:
+                    # Check if already in archive.org
+                    archived_org, archive_org_url = self.check_archive_org(page_url)
+                    archived_ph, archive_ph_url = self.check_archive_ph(page_url)
                     
-                    if not archived_org_author:
-                        if self.submit_to_archive_org(author_url):
-                            logger.info(f"Submitted author page to archive.org: {author_url}")
-                            self.update_submission_status(author_url, 'pending', 'archive.org')
+                    # Submit to archive.org if needed
+                    if not archived_org:
+                        try:
+                            if self.submit_to_archive_org(page_url):
+                                logger.info(f"Submitted marked image to archive.org: {page_url}")
+                                self.update_submission_status(page_url, 'pending', 'archive.org')
+                        except Exception as org_e:
+                            logger.error(f"Error submitting marked image to archive.org for {page_url}: {org_e}")
                     
-                    if not archived_ph_author:
-                        if self.submit_to_archive_ph(author_url):
-                            logger.info(f"Submitted author page to archive.ph: {author_url}")
-                            self.update_submission_status(author_url, 'pending', 'archive.ph')
+                    # Submit to archive.ph if needed
+                    if not archived_ph:
+                        try:
+                            if self.submit_to_archive_ph(page_url):
+                                logger.info(f"Submitted marked image to archive.ph: {page_url}")
+                                self.update_submission_status(page_url, 'pending', 'archive.ph')
+                        except Exception as ph_e:
+                            logger.error(f"Error submitting marked image to archive.ph for {page_url}: {ph_e}")
                     
-                    # Submit author details page
-                    details_url = f"{author_url}/details"
-                    archived_org_details, _ = self.check_archive_org(details_url)
-                    archived_ph_details, _ = self.check_archive_ph(details_url)
+                    # Also submit author page if available
+                    if author_url:
+                        try:
+                            # Check author page
+                            archived_org_author, _ = self.check_archive_org(author_url)
+                            archived_ph_author, _ = self.check_archive_ph(author_url)
+                            
+                            if not archived_org_author:
+                                if self.submit_to_archive_org(author_url):
+                                    logger.info(f"Submitted author page to archive.org: {author_url}")
+                                    self.update_submission_status(author_url, 'pending', 'archive.org')
+                            
+                            if not archived_ph_author:
+                                if self.submit_to_archive_ph(author_url):
+                                    logger.info(f"Submitted author page to archive.ph: {author_url}")
+                                    self.update_submission_status(author_url, 'pending', 'archive.ph')
+                            
+                            # Submit author details page
+                            details_url = f"{author_url}/details"
+                            archived_org_details, _ = self.check_archive_org(details_url)
+                            archived_ph_details, _ = self.check_archive_ph(details_url)
+                            
+                            if not archived_org_details:
+                                if self.submit_to_archive_org(details_url):
+                                    logger.info(f"Submitted author details to archive.org: {details_url}")
+                                    self.update_submission_status(details_url, 'pending', 'archive.org')
+                            
+                            if not archived_ph_details:
+                                if self.submit_to_archive_ph(details_url):
+                                    logger.info(f"Submitted author details to archive.ph: {details_url}")
+                                    self.update_submission_status(details_url, 'pending', 'archive.ph')
+                        except Exception as author_e:
+                            logger.error(f"Error processing author pages for {author_url}: {author_e}")
                     
-                    if not archived_org_details:
-                        if self.submit_to_archive_org(details_url):
-                            logger.info(f"Submitted author details to archive.org: {details_url}")
-                            self.update_submission_status(details_url, 'pending', 'archive.org')
-                    
-                    if not archived_ph_details:
-                        if self.submit_to_archive_ph(details_url):
-                            logger.info(f"Submitted author details to archive.ph: {details_url}")
-                            self.update_submission_status(details_url, 'pending', 'archive.ph')
-                
-                time.sleep(2.5)  # Rate limiting
+                    time.sleep(2.5)  # Rate limiting
+                except Exception as img_e:
+                    logger.error(f"Error processing marked image {page_url}: {img_e}")
+                    time.sleep(2.5)  # Continue to the next image if there's an error
                 
         except Exception as e:
             logger.error(f"Error processing marked images: {e}")
@@ -931,24 +965,34 @@ class ArchiveSubmitter:
             logger.info(f"Found {len(images)} unarchived images for favorite author {author_name} in this batch.")
             
             for page_url, author_url in images:
-                # Check if already in archive.org
-                archived_org, archive_org_url = self.check_archive_org(page_url)
-                archived_ph, archive_ph_url = self.check_archive_ph(page_url)
-                
-                # Submit to archive.org if needed
-                if not archived_org:
-                    if self.submit_to_archive_org(page_url):
-                        logger.info(f"Submitted favorite author image to archive.org: {page_url}")
-                        self.update_submission_status(page_url, 'pending', 'archive.org')
-                
-                # Submit to archive.ph if needed
-                if not archived_ph:
-                    if self.submit_to_archive_ph(page_url):
-                        logger.info(f"Submitted favorite author image to archive.ph: {page_url}")
-                        self.update_submission_status(page_url, 'pending', 'archive.ph')
-                
-                time.sleep(2)  # Rate limiting
+                try:
+                    # Check if already in archive.org
+                    archived_org, archive_org_url = self.check_archive_org(page_url)
                     
+                    # Submit to archive.org if needed
+                    if not archived_org:
+                        try:
+                            if self.submit_to_archive_org(page_url):
+                                logger.info(f"Submitted favorite author image to archive.org: {page_url}")
+                                self.update_submission_status(page_url, 'pending', 'archive.org')
+                        except Exception as org_e:
+                            logger.error(f"Error submitting to archive.org for {page_url}: {org_e}")
+                    
+                    # Check and submit to archive.ph if needed
+                    try:
+                        archived_ph, archive_ph_url = self.check_archive_ph(page_url)
+                        if not archived_ph:
+                            if self.submit_to_archive_ph(page_url):
+                                logger.info(f"Submitted favorite author image to archive.ph: {page_url}")
+                                self.update_submission_status(page_url, 'pending', 'archive.ph')
+                    except Exception as ph_e:
+                        logger.error(f"Error submitting to archive.ph for {page_url}: {ph_e}")
+                    
+                    time.sleep(2)  # Rate limiting
+                except Exception as img_e:
+                    logger.error(f"Error processing favorite author image {page_url}: {img_e}")
+                    time.sleep(2)  # Continue to the next image if there's an error
+                
         except Exception as e:
             logger.error(f"Error processing favorite authors: {e}")
 
