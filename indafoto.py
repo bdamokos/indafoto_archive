@@ -21,6 +21,46 @@ import subprocess
 import signal
 import atexit
 
+def check_for_updates():
+    """Check if there's a newer version of the script available on GitHub."""
+    try:
+        # Get local file info
+        local_path = os.path.abspath(__file__)
+        local_mtime = datetime.fromtimestamp(os.path.getmtime(local_path))
+        
+        with open(local_path, 'r', encoding='utf-8') as f:
+            local_content = f.read()
+        
+        # Get the latest version from GitHub
+        github_url = "https://raw.githubusercontent.com/bdamokos/indafoto_archive/main/indafoto.py"
+        response = requests.get(github_url, timeout=5)
+        
+        if response.status_code == 200:
+            github_content = response.text
+            
+            # Normalize line endings for comparison
+            local_content = local_content.replace('\r\n', '\n')
+            github_content = github_content.replace('\r\n', '\n')
+            
+            if local_content != github_content:
+                print("\n" + "="*80)
+                print("UPDATE AVAILABLE!")
+                print(f"Your version date: {local_mtime.strftime('%Y-%m-%d %H:%M:%S')}")
+                print("\nTo see what changed:")
+                print("https://github.com/bdamokos/indafoto_archive/commits/main/indafoto.py")
+                print("\nTo update:")
+                print("1. If you used git clone:")
+                print("   Run: git pull")
+                print("\n2. If you downloaded the ZIP:")
+                print("   Download the latest version from:")
+                print("   https://github.com/bdamokos/indafoto_archive/archive/refs/heads/main.zip")
+                print("="*80 + "\n")
+                
+                # Give user a chance to read the message
+                time.sleep(5)
+    except Exception as e:
+        logger.warning(f"Failed to check for updates: {e}")
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -2044,9 +2084,15 @@ if __name__ == "__main__":
                        help='Remove an author from the banned list')
     parser.add_argument('--cleanup-banned',
                        help='Clean up all content from a banned author')
+    parser.add_argument('--no-update-check', action='store_true',
+                       help='Skip checking for updates')
     args = parser.parse_args()
     
     try:
+        # Check for updates unless explicitly disabled
+        if not args.no_update_check:
+            check_for_updates()
+            
         # Set the number of workers from command line argument
         current_workers = args.workers
         MAX_WORKERS = args.workers
