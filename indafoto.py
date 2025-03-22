@@ -1013,7 +1013,7 @@ def extract_metadata(photo_page_url, attempt=1, session=None):
         
         # Temporary server errors - retry with backoff
         if status_code in [408, 500, 502, 503, 504] and attempt < 3:
-            backoff_time = min(5.408 * attempt, 240)
+            backoff_time = min(2.408 * attempt, 240)
             logger.warning(f"Server error {status_code} for {photo_page_url}, backing off for {backoff_time}s")
             time.sleep(backoff_time)
             return extract_metadata(photo_page_url, attempt=attempt + 1, session=session)
