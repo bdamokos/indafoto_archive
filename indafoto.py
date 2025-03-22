@@ -561,7 +561,7 @@ def get_image_links(search_page_url, attempt=1, session=None):
                     pass
                     
                 # Determine backoff time based on attempt number
-                backoff_time = min(30 * attempt, 300)  # Max 5 minutes
+                backoff_time = min(20 * attempt, 300)  # Max 5 minutes
                 logger.info(f"Request Timeout (408), backing off for {backoff_time} seconds")
                 time.sleep(backoff_time)
                 
@@ -1009,7 +1009,7 @@ def extract_metadata(photo_page_url, attempt=1, session=None):
         
         # Temporary server errors - retry with backoff
         if status_code in [408, 500, 502, 503, 504] and attempt < 3:
-            backoff_time = min(45 * attempt, 240)
+            backoff_time = min(15 * attempt, 240)
             logger.warning(f"Server error {status_code} for {photo_page_url}, backing off for {backoff_time}s")
             time.sleep(backoff_time)
             return extract_metadata(photo_page_url, attempt=attempt + 1, session=session)
