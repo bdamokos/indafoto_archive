@@ -31,33 +31,59 @@ def check_for_updates():
         with open(local_path, 'r', encoding='utf-8') as f:
             local_content = f.read()
         
-        # Get the latest version from GitHub
-        github_url = "https://raw.githubusercontent.com/bdamokos/indafoto_archive/main/indafoto.py"
-        response = requests.get(github_url, timeout=5)
+        # Get the latest version info from GitHub API first
+        api_url = "https://api.github.com/repos/bdamokos/indafoto_archive/commits"
+        api_params = {
+            "path": "indafoto.py",
+            "page": 1,
+            "per_page": 1
+        }
+        api_response = requests.get(api_url, params=api_params, timeout=5)
         
-        if response.status_code == 200:
-            github_content = response.text
+        if api_response.status_code == 200:
+            commit_info = api_response.json()[0]
+            github_date = datetime.strptime(commit_info['commit']['committer']['date'], "%Y-%m-%dT%H:%M:%SZ")
             
-            # Normalize line endings for comparison
-            local_content = local_content.replace('\r\n', '\n')
-            github_content = github_content.replace('\r\n', '\n')
+            # Get the file content from GitHub
+            github_url = "https://raw.githubusercontent.com/bdamokos/indafoto_archive/main/indafoto.py"
+            response = requests.get(github_url, timeout=5)
             
-            if local_content != github_content:
-                print("\n" + "="*80)
-                print("UPDATE AVAILABLE!")
-                print(f"Your version date: {local_mtime.strftime('%Y-%m-%d %H:%M:%S')}")
-                print("\nTo see what changed:")
-                print("https://github.com/bdamokos/indafoto_archive/commits/main/indafoto.py")
-                print("\nTo update:")
-                print("1. If you used git clone:")
-                print("   Run: git pull")
-                print("\n2. If you downloaded the ZIP:")
-                print("   Download the latest version from:")
-                print("   https://github.com/bdamokos/indafoto_archive/archive/refs/heads/main.zip")
-                print("="*80 + "\n")
+            if response.status_code == 200:
+                github_content = response.text
                 
-                # Give user a chance to read the message
-                time.sleep(5)
+                # Normalize line endings for comparison
+                local_content = local_content.replace('\r\n', '\n')
+                github_content = github_content.replace('\r\n', '\n')
+                
+                if local_content != github_content:
+                    print("\n" + "="*80)
+                    
+                    # Compare dates to determine if local is newer or older
+                    if local_mtime > github_date:
+                        print("NOTE: Your version is newer than the one on GitHub!")
+                        print(f"Your version date:   {local_mtime.strftime('%Y-%m-%d %H:%M:%S')}")
+                        print(f"GitHub version date: {github_date.strftime('%Y-%m-%d %H:%M:%S')}")
+                        print("\nThis might mean:")
+                        print("1. You have local modifications")
+                        print("2. Your changes haven't been pushed to GitHub yet")
+                        print("3. The file timestamps are incorrect")
+                    else:
+                        print("UPDATE AVAILABLE!")
+                        print(f"Your version date:   {local_mtime.strftime('%Y-%m-%d %H:%M:%S')}")
+                        print(f"GitHub version date: {github_date.strftime('%Y-%m-%d %H:%M:%S')}")
+                        print("\nTo see what changed:")
+                        print("https://github.com/bdamokos/indafoto_archive/commits/main/indafoto.py")
+                        print("\nTo update:")
+                        print("1. If you used git clone:")
+                        print("   Run: git pull")
+                        print("\n2. If you downloaded the ZIP:")
+                        print("   Download the latest version from:")
+                        print("   https://github.com/bdamokos/indafoto_archive/archive/refs/heads/main.zip")
+                    
+                    print("="*80 + "\n")
+                    
+                    # Give user a chance to read the message
+                    time.sleep(5)
     except Exception as e:
         logger.warning(f"Failed to check for updates: {e}")
 
