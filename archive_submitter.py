@@ -134,6 +134,112 @@ class ArchiveSubmitter:
             logger.error(f"Failed to check archive.ph for {url}: {e}")
             return False, None
 
+    def fetch_archive_org_listings(self, domain="indafoto.hu", limit=10000):
+        """
+        Fetch archived URLs from archive.org for a domain using the CDX API.
+        
+        Args:
+            domain: The domain to search archives for
+            limit: Maximum number of results to retrieve
+            
+        Returns:
+            A list of tuples (original_url, archive_url, timestamp)
+        """
+        results = []
+        
+        try:
+            # Get URLs we've already cataloged from archive.org
+            self.cursor.execute("""
+                SELECT url 
+                FROM archive_submissions 
+                WHERE archive_service = 'archive.org' AND status = 'success'
+            """)
+            already_archived_urls = set([row[0] for row in self.cursor.fetchall()])
+            
+            cdx_url = f"https://web.archive.org/cdx/search/cdx?url={domain}/*&output=json&limit={limit}"
+            logger.info(f"Fetching archive.org CDX data for {domain}")
+            
+            response = self.session.get(cdx_url, timeout=120)  # Longer timeout as this can be slow
+            if not response.ok:
+                logger.error(f"Failed to fetch archive.org CDX data: {response.status_code}")
+                return results
+                
+            try:
+                data = response.json()
+            except Exception as e:
+                logger.error(f"Failed to parse archive.org CDX data as JSON: {e}")
+                return results
+            
+            # Skip the header row
+            if len(data) <= 1:
+                logger.info("No archive.org data found")
+                return results
+                
+            # Get header indices
+            try:
+                header = data[0]
+                timestamp_idx = header.index("timestamp")
+                original_idx = header.index("original")
+                status_idx = header.index("statuscode") if "statuscode" in header else None
+                mime_idx = header.index("mimetype") if "mimetype" in header else None
+            except Exception as e:
+                logger.error(f"Error parsing CDX header: {e}")
+                return results
+            
+            # Process data rows
+            for row in data[1:]:
+                try:
+                    if len(row) <= max(timestamp_idx, original_idx):
+                        logger.warning(f"Skipping invalid CDX row (too short): {row}")
+                        continue
+                    
+                    timestamp_str = row[timestamp_idx]
+                    original_url = row[original_idx]
+                    
+                    # Only process indafoto.hu URLs
+                    if "indafoto.hu" not in original_url:
+                        continue
+                    
+                    # Skip already archived URLs
+                    if original_url in already_archived_urls:
+                        continue
+                    
+                    # Verify status code if available (only accept 200 OK)
+                    if status_idx is not None and len(row) > status_idx:
+                        status_code = row[status_idx]
+                        if status_code != "200":
+                            continue
+                    
+                    # Verify mime type if available (only accept HTML)
+                    if mime_idx is not None and len(row) > mime_idx:
+                        mime_type = row[mime_idx]
+                        if not (mime_type.startswith("text/html") or mime_type == ""):
+                            continue
+                    
+                    # Parse the timestamp (format: YYYYMMDDhhmmss)
+                    try:
+                        timestamp = datetime.strptime(timestamp_str, "%Y%m%d%H%M%S")
+                        
+                        # Only accept captures from July 2024 onwards
+                        cutoff_date = datetime(2024, 7, 1)
+                        if timestamp < cutoff_date:
+                            continue
+                        
+                        # Create archive.org URL with timestamp
+                        archive_url = f"https://web.archive.org/web/{timestamp_str}/{original_url}"
+                        results.append((original_url, archive_url, timestamp))
+                    except ValueError:
+                        logger.warning(f"Could not parse timestamp: {timestamp_str}")
+                except Exception as e:
+                    logger.warning(f"Error processing CDX row: {e}")
+            
+            logger.info(f"Found {len(results)} valid archive.org entries for {domain}")
+            
+        except Exception as e:
+            logger.error(f"Error fetching archive.org listings: {e}")
+            
+        return results
+
     def fetch_archive_ph_listings(self, domain="indafoto.hu", max_pages=10, author_pattern=None):
         """
         Fetch and parse the archive.ph listings for a domain or specific author pattern.
@@ -158,7 +264,6 @@ class ArchiveSubmitter:
                 WHERE archive_service = 'archive.ph' AND status = 'success'
             """)
             already_archived_urls = set([row[0] for row in self.cursor.fetchall()])
-            logger.debug(f"Found {len(already_archived_urls)} already archived URLs in database")
                 
             # Enhanced browser-like headers
             enhanced_headers = {
@@ -199,7 +304,6 @@ class ArchiveSubmitter:
                 else:
                     url += domain
                 
-                logger.info(f"Fetching URL: {url}")
                 try:
                     response = self.session.get(url, headers=enhanced_headers, timeout=60)
                     if response.status_code == 429:
@@ -209,17 +313,12 @@ class ArchiveSubmitter:
                         logger.error(f"Failed to fetch archive.ph listing page {page+1}: {response.status_code}")
                         break
                     
-                    # Debug: save the HTML to file for inspection
-                    with open(f"archive_ph_debug_page_{page+1}.html", "w", encoding="utf-8") as f:
-                        f.write(response.text)
-                    
                     soup = BeautifulSoup(response.text, "html.parser")
                     
                     # Check if we have results by looking for the pager
                     pager = soup.select_one("#pager")
                     if pager:
                         pager_text = pager.get_text().strip()
-                        logger.info(f"Pager text: {pager_text}")
                         # Extract pagination info like "1..20 of 194 urls"
                         pagination_match = re.search(r'(\d+)\.\.(\d+) of (\d+)', pager_text)
                         if pagination_match:
@@ -238,26 +337,20 @@ class ArchiveSubmitter:
                     page_items_found = 0
                     for row_idx, row in enumerate(rows):
                         try:
-                            # Debug for this row
-                            logger.debug(f"Processing row {row_idx}")
-                            
                             # The archive URL is in the first link in the TEXT-BLOCK
                             text_block = row.select_one(".TEXT-BLOCK")
                             if not text_block:
-                                logger.warning(f"No TEXT-BLOCK found in row {row_idx}")
                                 continue
                                 
                             # First link contains the archive URL
                             links = text_block.select("a")
                             if len(links) < 2:
-                                logger.warning(f"Not enough links found in TEXT-BLOCK: {len(links)}")
                                 continue
                             
                             # Get archive URL from first link
                             archive_link = links[0]
                             archive_url = archive_link.get('href')
                             if not archive_url or not archive_url.startswith("https://archive.ph/"):
-                                logger.warning(f"Invalid archive URL: {archive_url}")
                                 continue
                             
                             # Get original URL from second link
@@ -271,49 +364,40 @@ class ArchiveSubmitter:
                                 elif original_url_raw.startswith("https://archive.ph/http://"):
                                     original_url = original_url_raw.replace("https://archive.ph/http://", "http://")
                                 else:
-                                    logger.warning(f"Unexpected original URL format: {original_url_raw}")
                                     original_url = original_url_raw
                             else:
-                                logger.warning(f"No original URL found")
                                 continue
                             
                             # Skip non-indafoto.hu URLs
                             if "indafoto.hu" not in original_url:
-                                logger.debug(f"Skipping non-indafoto.hu URL: {original_url}")
                                 continue
                             
                             # Skip already archived URLs
                             if original_url in already_archived_urls:
-                                logger.debug(f"Skipping already archived URL: {original_url}")
                                 continue
                                 
                             # The timestamp is in the THUMBS-BLOCK
                             thumbs_block = row.select_one(".THUMBS-BLOCK")
                             if not thumbs_block:
-                                logger.warning(f"No THUMBS-BLOCK found in row {row_idx}")
                                 continue
                                 
                             # Get timestamp div (contains text like "22 Mar 2025 20:48")
                             timestamp_div = thumbs_block.select_one("div[style*='white-space:nowrap']")
                             if not timestamp_div:
-                                logger.warning(f"No timestamp div found in THUMBS-BLOCK")
                                 continue
                                 
                             timestamp_str = timestamp_div.get_text().strip()
-                            logger.debug(f"Timestamp string: {timestamp_str}")
                             
                             # Parse the timestamp (format: "22 Mar 2025 20:48")
                             try:
                                 timestamp = datetime.strptime(timestamp_str, "%d %b %Y %H:%M")
-                                logger.debug(f"Parsed timestamp: {timestamp}")
                                 
                                 # All items are new since we already filtered out existing URLs
                                 page_items_found += 1
                                 total_items_found += 1
                                 results.append((original_url, archive_url, timestamp))
-                                logger.debug(f"Added result: {original_url}, {archive_url}, {timestamp}")
                             except ValueError as e:
-                                logger.warning(f"Could not parse timestamp: {timestamp_str} - {e}")
+                                logger.warning(f"Could not parse timestamp: {timestamp_str}")
                         except Exception as e:
                             logger.error(f"Error parsing archive item in row {row_idx}: {e}")
                     
@@ -336,76 +420,9 @@ class ArchiveSubmitter:
                     break
                 
         except Exception as e:
-            logger.error(f"Error fetching archive.ph listings: {e}", exc_info=True)
+            logger.error(f"Error fetching archive.ph listings: {e}")
             
         logger.info(f"Total archive.ph items found: {len(results)}")
-        return results
-        
-    def fetch_archive_org_listings(self, domain="indafoto.hu", limit=10000):
-        """
-        Fetch archived URLs from archive.org for a domain using the CDX API.
-        
-        Args:
-            domain: The domain to search archives for
-            limit: Maximum number of results to retrieve
-            
-        Returns:
-            A list of tuples (original_url, archive_url, timestamp)
-        """
-        results = []
-        
-        try:
-            # Get the most recent archive we've already recorded
-            self.cursor.execute("""
-                SELECT MIN(submission_date) 
-                FROM archive_submissions 
-                WHERE archive_service = 'archive.org' AND status = 'success'
-            """)
-            newest_timestamp = self.cursor.fetchone()[0]
-            if newest_timestamp:
-                newest_date = datetime.strptime(newest_timestamp.split('.')[0], '%Y-%m-%d %H:%M:%S')
-            else:
-                newest_date = None
-            
-            cdx_url = f"https://web.archive.org/cdx/search/cdx?url={domain}/*&output=json&limit={limit}"
-            logger.info(f"Fetching archive.org CDX data for {domain}")
-            
-            response = self.session.get(cdx_url, timeout=120)  # Longer timeout as this can be slow
-            if not response.ok:
-                logger.error(f"Failed to fetch archive.org CDX data: {response.status_code}")
-                return results
-                
-            data = response.json()
-            
-            # Skip the header row
-            if len(data) <= 1:
-                logger.info("No archive.org data found")
-                return results
-                
-            header = data[0]
-            timestamp_idx = header.index("timestamp")
-            original_idx = header.index("original")
-            
-            for row in data[1:]:
-                timestamp_str = row[timestamp_idx]
-                original_url = row[original_idx]
-                
-                # Parse the timestamp (format: YYYYMMDDhhmmss)
-                try:
-                    timestamp = datetime.strptime(timestamp_str, "%Y%m%d%H%M%S")
-                    
-                    # If we have a newest date and this item is older, skip it
-                    if newest_date and timestamp < newest_date:
-                        continue
-                        
-                    archive_url = f"https://web.archive.org/web/{timestamp_str}/{original_url}"
-                    results.append((original_url, archive_url, timestamp))
-                except ValueError:
-                    logger.warning(f"Could not parse timestamp: {timestamp_str}")
-            
-        except Exception as e:
-            logger.error(f"Error fetching archive.org listings: {e}")
-            
         return results
 
     def update_archives_from_listings(self):
@@ -906,6 +923,41 @@ class ArchiveSubmitter:
         except Exception as e:
             logger.error(f"Error processing favorite authors: {e}")
 
+    def process_archived_urls(self):
+        """
+        Process existing archive.org and archive.ph URLs.
+        This fetches and adds entries from both archive services.
+        """
+        try:
+            # Fetch archive.org listings
+            logger.info("Fetching archive.org listings...")
+            org_listings = self.fetch_archive_org_listings()
+            logger.info(f"Found {len(org_listings)} archive.org listings")
+
+            # Process archive.org listings
+            archived_count = 0
+            for original_url, archive_url, timestamp in org_listings:
+                self.update_archive_from_listing(original_url, archive_url, 'archive.org', timestamp)
+                archived_count += 1
+                if archived_count % 100 == 0:
+                    logger.info(f"Processed {archived_count} archive.org listings")
+
+            # Fetch archive.ph listings
+            logger.info("Fetching archive.ph listings...")
+            ph_listings = self.fetch_archive_ph_listings()
+            logger.info(f"Found {len(ph_listings)} archive.ph listings")
+
+            # Process archive.ph listings
+            for original_url, archive_url, timestamp in ph_listings:
+                self.update_archive_from_listing(original_url, archive_url, 'archive.ph', timestamp)
+                archived_count += 1
+                if archived_count % 100 == 0:
+                    logger.info(f"Processed {archived_count} total listings")
+            
+            logger.info(f"Finished processing {archived_count} archived URLs")
+        except Exception as e:
+            logger.error(f"Error processing archived URLs: {e}")
+
     def run(self):
         """Main loop for the archive submitter."""
         logger.info("Starting archive submitter service")
@@ -930,6 +982,9 @@ class ArchiveSubmitter:
                 
                 logger.info("Verifying pending submissions...")
                 self.verify_pending_submissions()
+                
+                logger.info("Processing archived URLs...")
+                self.process_archived_urls()
                 
                 logger.info(f"Sleeping for {CHECK_INTERVAL} seconds...")
                 time.sleep(CHECK_INTERVAL)
