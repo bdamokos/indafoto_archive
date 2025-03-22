@@ -187,6 +187,7 @@ class ArchiveSubmitter:
                 WHERE archive_service = 'archive.org' AND status = 'success'
             """)
             already_archived_urls = set([row[0] for row in self.cursor.fetchall()])
+            logger.info(f"Already have {len(already_archived_urls)} archive.org URLs in database")
             
             cdx_url = f"https://web.archive.org/cdx/search/cdx?url={domain}/*&output=json&limit={limit}"
             logger.info(f"Fetching archive.org CDX data for {domain}")
@@ -265,7 +266,7 @@ class ArchiveSubmitter:
                 except Exception as e:
                     logger.warning(f"Error processing CDX row: {e}")
             
-            logger.info(f"Found {len(results)} valid archive.org entries for {domain}")
+            logger.info(f"Found {len(results)} NEW valid archive.org entries for {domain}")
             
         except Exception as e:
             logger.error(f"Error fetching archive.org listings: {e}")
@@ -296,6 +297,7 @@ class ArchiveSubmitter:
                 WHERE archive_service = 'archive.ph' AND status = 'success'
             """)
             already_archived_urls = set([row[0] for row in self.cursor.fetchall()])
+            logger.info(f"Already have {len(already_archived_urls)} archive.ph URLs in database")
                 
             # Enhanced browser-like headers
             enhanced_headers = {
@@ -454,7 +456,7 @@ class ArchiveSubmitter:
         except Exception as e:
             logger.error(f"Error fetching archive.ph listings: {e}")
             
-        logger.info(f"Total archive.ph items found: {len(results)}")
+        logger.info(f"Total NEW archive.ph items found: {len(results)}")
         return results
 
     def update_archives_from_listings(self):
@@ -465,11 +467,11 @@ class ArchiveSubmitter:
         try:
             # Get archive.ph listings
             ph_listings = self.fetch_archive_ph_listings()
-            logger.info(f"Found {len(ph_listings)} archive.ph listings")
+            logger.info(f"Found {len(ph_listings)} NEW archive.ph listings to add")
             
             # Get archive.org listings
             org_listings = self.fetch_archive_org_listings()
-            logger.info(f"Found {len(org_listings)} archive.org listings")
+            logger.info(f"Found {len(org_listings)} NEW archive.org listings to add")
             
             # Process all listings
             total_updated = 0
@@ -484,7 +486,7 @@ class ArchiveSubmitter:
                 self.update_archive_from_listing(original_url, archive_url, 'archive.org', timestamp)
                 total_updated += 1
                 
-            logger.info(f"Updated {total_updated} entries from archive listings")
+            logger.info(f"Added {total_updated} NEW entries from archive listings")
             
         except Exception as e:
             logger.error(f"Error updating archives from listings: {e}")
@@ -1005,7 +1007,7 @@ class ArchiveSubmitter:
             # Fetch archive.org listings
             logger.info("Fetching archive.org listings...")
             org_listings = self.fetch_archive_org_listings()
-            logger.info(f"Found {len(org_listings)} archive.org listings")
+            logger.info(f"Found {len(org_listings)} NEW archive.org listings to add")
 
             # Process archive.org listings
             archived_count = 0
@@ -1013,21 +1015,21 @@ class ArchiveSubmitter:
                 self.update_archive_from_listing(original_url, archive_url, 'archive.org', timestamp)
                 archived_count += 1
                 if archived_count % 100 == 0:
-                    logger.info(f"Processed {archived_count} archive.org listings")
+                    logger.info(f"Processed {archived_count} NEW archive.org listings")
 
             # Fetch archive.ph listings
             logger.info("Fetching archive.ph listings...")
             ph_listings = self.fetch_archive_ph_listings()
-            logger.info(f"Found {len(ph_listings)} archive.ph listings")
+            logger.info(f"Found {len(ph_listings)} NEW archive.ph listings to add")
 
             # Process archive.ph listings
             for original_url, archive_url, timestamp in ph_listings:
                 self.update_archive_from_listing(original_url, archive_url, 'archive.ph', timestamp)
                 archived_count += 1
                 if archived_count % 100 == 0:
-                    logger.info(f"Processed {archived_count} total listings")
+                    logger.info(f"Processed {archived_count} total NEW listings")
             
-            logger.info(f"Finished processing {archived_count} archived URLs")
+            logger.info(f"Finished processing {archived_count} NEW archived URLs")
         except Exception as e:
             logger.error(f"Error processing archived URLs: {e}")
 
