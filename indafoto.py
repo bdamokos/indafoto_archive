@@ -566,20 +566,39 @@ def parse_hungarian_date(date_str):
         logger.warning(f"Failed to parse Hungarian date '{date_str}': {e}")
     return None
 
+def handle_timeout_error(url, attempt, error_type="request"):
+    """Centralized timeout error handling."""
+    backoff_time = min(30 * attempt, 300)  # Max 5 minutes
+    logger.info(f"{error_type} timeout for {url}, backing off for {backoff_time} seconds (attempt {attempt})")
+    time.sleep(backoff_time)
+    return attempt + 1
+
 def extract_metadata(photo_page_url, attempt=1, session=None):
-    """Extract metadata from a photo page."""
+    """Extract metadata from a photo page with improved error handling."""
     try:
+        # Verify session health only if:
+        # 1. We have a session
+        # 2. This is a retry attempt (attempt > 1)
+        # 3. The previous attempt failed with a connection error
+        if session and attempt > 1 and isinstance(getattr(session, '_last_error', None), 
+                                                (requests.exceptions.ConnectionError, 
+                                                 requests.exceptions.ChunkedEncodingError)):
+            # Session had connection issues, create a fresh one
+            session = create_session()
+        
         timeout = BASE_TIMEOUT * attempt  # Progressive timeout
         if session:
             response = session.get(photo_page_url, timeout=timeout)
         else:
-            # Create a new session with HTTP/2 support
             temp_session = create_session(max_retries=attempt)
             response = temp_session.get(photo_page_url, timeout=timeout)
-        if not response.ok:
-            logger.error(f"Failed to fetch metadata from {photo_page_url}: HTTP {response.status_code}")
-            return None
 
+        response.raise_for_status()
+        
+        # Clear any stored error state on success
+        if hasattr(session, '_last_error'):
+            delattr(session, '_last_error')
+        
         soup = BeautifulSoup(response.text, "html.parser")
         
         # Extract title from h1 tag
@@ -825,8 +844,60 @@ def extract_metadata(photo_page_url, attempt=1, session=None):
         }
 
         return metadata
+    except (requests.exceptions.ConnectionError, 
+            requests.exceptions.ChunkedEncodingError) as e:
+        # Store the error type on the session object
+        if session:
+            session._last_error = e
+            
+        # Network connectivity issues - could be local network or system sleep
+        if attempt < 3:
+            backoff_time = min(60 * attempt, 300)  # Longer backoff for connection issues
+            logger.warning(f"Connection error for {photo_page_url}, backing off for {backoff_time}s: {e}")
+            time.sleep(backoff_time)
+            # Create fresh session on connection errors
+            return extract_metadata(photo_page_url, attempt=attempt + 1, session=create_session())
+        logger.error(f"Max connection retries reached for {photo_page_url}")
+        return None
+
+    except requests.exceptions.Timeout as e:
+        # Request timeout - could be server or network latency
+        if attempt < 3:
+            backoff_time = min(30 * attempt, 180)
+            logger.warning(f"Timeout for {photo_page_url}, backing off for {backoff_time}s")
+            time.sleep(backoff_time)
+            return extract_metadata(photo_page_url, attempt=attempt + 1, session=session)
+        logger.error(f"Max timeout retries reached for {photo_page_url}")
+        return None
+
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code
+        
+        # Temporary server errors - retry with backoff
+        if status_code in [408, 500, 502, 503, 504] and attempt < 3:
+            backoff_time = min(45 * attempt, 240)
+            logger.warning(f"Server error {status_code} for {photo_page_url}, backing off for {backoff_time}s")
+            time.sleep(backoff_time)
+            return extract_metadata(photo_page_url, attempt=attempt + 1, session=session)
+            
+        # Permanent errors - don't retry
+        elif status_code in [400, 401, 403, 404]:
+            logger.error(f"Permanent error {status_code} for {photo_page_url}")
+            return None
+            
+        # Other errors - log but don't retry
+        logger.error(f"HTTP error {status_code} for {photo_page_url}")
+        return None
+
+    except requests.exceptions.RequestException as e:
+        # Other request errors (including MustRedialError)
+        # Let the built-in retry mechanism handle these
+        logger.error(f"Request error for {photo_page_url}: {e}")
+        return None
+
     except Exception as e:
-        logger.error(f"Error extracting metadata from {photo_page_url}: {e}")
+        # Unexpected errors (like parsing errors) - don't retry
+        logger.error(f"Unexpected error for {photo_page_url}: {e}")
         return None
 
 def calculate_file_hash(filepath):
