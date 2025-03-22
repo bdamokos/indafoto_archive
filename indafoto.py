@@ -21,11 +21,15 @@ import subprocess
 import signal
 import atexit
 
-def check_for_updates():
-    """Check if there's a newer version of the script available on GitHub."""
+def check_for_updates(filename=None):
+    """Check if there's a newer version of the script available on GitHub.
+    
+    Args:
+        filename: Optional filename to check. If None, checks the current script.
+    """
     try:
         # Get local file info
-        local_path = os.path.abspath(__file__)
+        local_path = os.path.abspath(filename if filename else __file__)
         local_mtime = datetime.fromtimestamp(os.path.getmtime(local_path))
         
         with open(local_path, 'r', encoding='utf-8') as f:
@@ -34,7 +38,7 @@ def check_for_updates():
         # Get the latest version info from GitHub API first
         api_url = "https://api.github.com/repos/bdamokos/indafoto_archive/commits"
         api_params = {
-            "path": "indafoto.py",
+            "path": os.path.basename(local_path),
             "page": 1,
             "per_page": 1
         }
@@ -45,7 +49,7 @@ def check_for_updates():
             github_date = datetime.strptime(commit_info['commit']['committer']['date'], "%Y-%m-%dT%H:%M:%SZ")
             
             # Get the file content from GitHub
-            github_url = "https://raw.githubusercontent.com/bdamokos/indafoto_archive/main/indafoto.py"
+            github_url = f"https://raw.githubusercontent.com/bdamokos/indafoto_archive/main/{os.path.basename(local_path)}"
             response = requests.get(github_url, timeout=5)
             
             if response.status_code == 200:
@@ -72,7 +76,7 @@ def check_for_updates():
                         print(f"Your version date:   {local_mtime.strftime('%Y-%m-%d %H:%M:%S')}")
                         print(f"GitHub version date: {github_date.strftime('%Y-%m-%d %H:%M:%S')}")
                         print("\nTo see what changed:")
-                        print("https://github.com/bdamokos/indafoto_archive/commits/main/indafoto.py")
+                        print(f"https://github.com/bdamokos/indafoto_archive/commits/main/{os.path.basename(local_path)}")
                         print("\nTo update:")
                         print("1. If you used git clone:")
                         print("   Run: git pull")

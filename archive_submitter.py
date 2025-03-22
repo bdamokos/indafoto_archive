@@ -6,6 +6,8 @@ import niquests as requests
 import re
 from datetime import datetime
 from urllib.parse import quote_plus
+import argparse
+from indafoto import check_for_updates
 
 # Configure logging
 logging.basicConfig(
@@ -415,5 +417,17 @@ class ArchiveSubmitter:
                 time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
-    submitter = ArchiveSubmitter()
-    submitter.run() 
+    parser = argparse.ArgumentParser(description='Indafoto Archive Submitter')
+    parser.add_argument('--no-update-check', action='store_true',
+                       help='Skip checking for updates')
+    args = parser.parse_args()
+    
+    try:
+        # Check for updates unless explicitly disabled
+        if not args.no_update_check:
+            check_for_updates(__file__)
+            
+        submitter = ArchiveSubmitter()
+        submitter.run()
+    except Exception as e:
+        logger.critical(f"Unexpected error occurred: {e}", exc_info=True) 
