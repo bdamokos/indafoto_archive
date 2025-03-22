@@ -318,23 +318,34 @@ class ArchiveSubmitter:
     def process_favorite_authors(self):
         """Process images from favorite authors in batches."""
         try:
-            # Get favorite authors that have unarchived images, ordered by priority and last attempt
+            # Get favorite authors with unarchived images, biased toward authors with lowest percentage archived
             self.cursor.execute("""
-                WITH unarchived_counts AS (
-                    SELECT i.author,
-                           COUNT(*) as unarchived_count,
-                           MAX(COALESCE(a.last_attempt, '1970-01-01')) as last_attempt
+                WITH author_stats AS (
+                    SELECT 
+                        i.author,
+                        COUNT(*) as total_images,
+                        SUM(CASE WHEN a.status = 'success' THEN 1 ELSE 0 END) as archived_images,
+                        COUNT(*) - SUM(CASE WHEN a.status = 'success' THEN 1 ELSE 0 END) as unarchived_count
                     FROM images i
                     LEFT JOIN archive_submissions a ON i.page_url = a.url
-                    WHERE a.id IS NULL 
-                       OR (a.status = 'failed' AND a.retry_count < 3)
                     GROUP BY i.author
                 )
-                SELECT fa.author_name, fa.priority, uc.unarchived_count
+                SELECT 
+                    fa.author_name,
+                    ats.total_images,
+                    ats.archived_images,
+                    ats.unarchived_count,
+                    CASE 
+                        WHEN ats.total_images = 0 THEN 0
+                        ELSE ats.archived_images * 100.0 / ats.total_images 
+                    END as archived_percentage
                 FROM favorite_authors fa
-                INNER JOIN unarchived_counts uc ON fa.author_name = uc.author
-                ORDER BY fa.priority DESC,
-                         uc.last_attempt ASC
+                JOIN author_stats ats ON fa.author_name = ats.author
+                WHERE ats.unarchived_count > 0
+                ORDER BY RANDOM() / (100.0 - CASE 
+                                         WHEN ats.total_images = 0 THEN 0
+                                         ELSE ats.archived_images * 100.0 / ats.total_images 
+                                     END + 0.1)
                 LIMIT 1
             """)
             
@@ -342,8 +353,8 @@ class ArchiveSubmitter:
             if not author:
                 return
                 
-            author_name, priority, unarchived_count = author
-            logger.info(f"Processing favorite author: {author_name} (priority: {priority}, unarchived: {unarchived_count})")
+            author_name, total_images, archived_images, unarchived_count, archived_percentage = author
+            logger.info(f"Processing favorite author: {author_name} (total: {total_images}, archived: {archived_images}, unarchived: {unarchived_count}, percentage: {archived_percentage:.1f}%)")
             
             # Get unarchived images for this author in batches
             self.cursor.execute("""
@@ -352,7 +363,7 @@ class ArchiveSubmitter:
                 LEFT JOIN archive_submissions a ON i.page_url = a.url
                 WHERE i.author = ? 
                 AND (a.id IS NULL OR (a.status = 'failed' AND a.retry_count < 3))
-                ORDER BY i.id DESC
+                ORDER BY RANDOM()
                 LIMIT 60
             """, (author_name,))
             
