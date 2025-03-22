@@ -98,6 +98,22 @@ class ArchiveSubmitter:
     def check_archive_org(self, url):
         """Check if URL is already archived on archive.org using CDX API."""
         try:
+            # First check our database for existing successful submissions
+            self.cursor.execute("""
+                SELECT archive_url, submission_date
+                FROM archive_submissions
+                WHERE url = ? AND archive_service = 'archive.org' AND status = 'success'
+                ORDER BY submission_date DESC
+                LIMIT 1
+            """, (url,))
+            
+            result = self.cursor.fetchone()
+            if result:
+                archive_url, submission_date = result
+                logger.debug(f"Found {url} already verified in database for archive.org")
+                return True, archive_url
+            
+            # If not in database, check externally
             check_url = f"https://web.archive.org/cdx/search/cdx?url={quote_plus(url)}&output=json"
             response = self.session.get(check_url, timeout=60)
             if response.ok:
@@ -117,6 +133,22 @@ class ArchiveSubmitter:
     def check_archive_ph(self, url):
         """Check if URL is already archived on archive.ph using Memento TimeMap."""
         try:
+            # First check our database for existing successful submissions
+            self.cursor.execute("""
+                SELECT archive_url, submission_date
+                FROM archive_submissions
+                WHERE url = ? AND archive_service = 'archive.ph' AND status = 'success'
+                ORDER BY submission_date DESC
+                LIMIT 1
+            """, (url,))
+            
+            result = self.cursor.fetchone()
+            if result:
+                archive_url, submission_date = result
+                logger.debug(f"Found {url} already verified in database for archive.ph")
+                return True, archive_url
+            
+            # If not in database, check externally
             timemap_url = f"https://archive.ph/timemap/{url}"
             response = self.session.get(timemap_url, headers=HEADERS, timeout=60)
             if response.ok:
