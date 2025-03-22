@@ -350,3 +350,87 @@ If you encounter any issues:
    - Verify port 5001 is not in use
 
 If problems persist, please report the issue with the error message from the log file.
+
+### Command Line Arguments
+
+#### indafoto.py (Main Crawler)
+
+| Argument | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `--start-offset N` | Start crawling from page N | 0 | `--start-offset 100` |
+| `--retry` | Retry previously failed pages | False | `--retry` |
+| `--test` | Run test function for album extraction | False | `--test` |
+| `--test-tags` | Run tag extraction test | False | `--test-tags` |
+| `--test-camera` | Run camera make/model extraction test | False | `--test-camera` |
+| `--workers N` | Set number of parallel download workers | 8 | `--workers 4` |
+| `--redownload-author NAME` | Redownload all images from a specific author | None | `--redownload-author "john_doe"` |
+| `--ban-author NAME` | Add an author to the banned list (requires --ban-reason) | None | `--ban-author "spammer" --ban-reason "spam content"` |
+| `--ban-reason REASON` | Specify reason when banning an author | None | `--ban-author "spammer" --ban-reason "spam content"` |
+| `--unban-author NAME` | Remove an author from the banned list | None | `--unban-author "john_doe"` |
+| `--cleanup-banned NAME` | Clean up all content from a banned author | None | `--cleanup-banned "spammer"` |
+| `--no-update-check` | Skip checking for updates | False | `--no-update-check` |
+
+#### indafoto_archive_explorer.py (Web Interface)
+
+The Archive Explorer is a Flask web application and uses these environment variables and command line defaults:
+
+| Setting | Description | Default | How to Change |
+|---------|-------------|---------|---------------|
+| Port | Web server port | 5001 | Set `PORT` environment variable |
+| Host | Web server host | 0.0.0.0 | Set `HOST` environment variable |
+| Debug Mode | Flask debug mode | False | Set `FLASK_DEBUG=1` environment variable |
+
+Example usage:
+```bash
+# Start on default port 5001
+python indafoto_archive_explorer.py
+
+# Start on custom port
+PORT=8080 python indafoto_archive_explorer.py
+
+# Start in debug mode
+FLASK_DEBUG=1 python indafoto_archive_explorer.py
+```
+
+#### archive_submitter.py (Archive Service)
+
+The Archive Submitter runs as a background service and uses these configuration constants:
+
+| Setting | Description | Default | How to Change |
+|---------|-------------|---------|---------------|
+| `ARCHIVE_SAMPLE_RATE` | Percentage of images to archive | 0.005 (0.5%) | Edit constant in script |
+| `CHECK_INTERVAL` | Time between full cycles (seconds) | 10 | Edit constant in script |
+| `TASK_INTERVAL` | Time between different tasks (seconds) | 5 | Edit constant in script |
+
+Example usage:
+```bash
+# Start the archive submitter service
+python archive_submitter.py
+```
+
+#### redownload_missing.py (Recovery Tool)
+This utility script attempts to redownload images where we have extracted the metadata but failed to download the image.
+
+This utility script has no command line arguments but can be configured through these constants:
+
+| Setting | Description | Default | How to Change |
+|---------|-------------|---------|---------------|
+| `DB_FILE` | Database file path | "indafoto.db" | Edit constant in script |
+
+Example usage:
+```bash
+# Run the recovery tool
+python redownload_missing.py
+```
+
+Examples of combining arguments:
+```bash
+# Start from page 100 with 4 workers
+python indafoto.py --start-offset 100 --workers 4
+
+# Retry failed pages without update check
+python indafoto.py --retry --no-update-check
+
+# Ban an author and clean up their content
+python indafoto.py --ban-author "spammer" --ban-reason "spam content" --cleanup-banned "spammer"
+```
