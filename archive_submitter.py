@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 DB_FILE = "indafoto.db"
 ARCHIVE_SAMPLE_RATE = 0.005  # 0.5% sample rate for image pages
-CHECK_INTERVAL = 60  # 1 minute between full cycles
+CHECK_INTERVAL = 10  # 1 minute between full cycles
 TASK_INTERVAL = 5  # 5 seconds between different task types
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15'
@@ -141,7 +141,7 @@ class ArchiveSubmitter:
                         logger.info(f"Submitted details to archive.ph: {details_url}")
                         self.update_submission_status(details_url, 'pending', 'archive.ph')
                 
-                time.sleep(5)  # Rate limiting
+                time.sleep(2.5)  # Rate limiting
                 
         except Exception as e:
             logger.error(f"Error processing pending authors: {e}")
@@ -188,7 +188,7 @@ class ArchiveSubmitter:
                                 logger.info(f"Submitted image to archive.ph: {page_url}")
                                 self.update_submission_status(page_url, 'pending', 'archive.ph')
                         
-                        time.sleep(5)  # Rate limiting
+                        time.sleep(2.5)  # Rate limiting
 
         except Exception as e:
             logger.error(f"Error processing pending images: {e}")
@@ -308,7 +308,7 @@ class ArchiveSubmitter:
                             logger.info(f"Submitted author details to archive.ph: {details_url}")
                             self.update_submission_status(details_url, 'pending', 'archive.ph')
                 
-                time.sleep(5)  # Rate limiting
+                time.sleep(2.5)  # Rate limiting
                 
         except Exception as e:
             logger.error(f"Error processing marked images: {e}")
@@ -316,13 +316,23 @@ class ArchiveSubmitter:
     def process_favorite_authors(self):
         """Process images from favorite authors in batches."""
         try:
-            # Get favorite authors that haven't been processed recently
+            # Get favorite authors that have unarchived images, ordered by priority and last attempt
             self.cursor.execute("""
-                SELECT fa.author_name, fa.priority, fa.last_processed_date
+                WITH unarchived_counts AS (
+                    SELECT i.author,
+                           COUNT(*) as unarchived_count,
+                           MAX(COALESCE(a.last_attempt, '1970-01-01')) as last_attempt
+                    FROM images i
+                    LEFT JOIN archive_submissions a ON i.page_url = a.url
+                    WHERE a.id IS NULL 
+                       OR (a.status = 'failed' AND a.retry_count < 3)
+                    GROUP BY i.author
+                )
+                SELECT fa.author_name, fa.priority, uc.unarchived_count
                 FROM favorite_authors fa
-                WHERE fa.last_processed_date IS NULL 
-                   OR datetime(fa.last_processed_date) <= datetime('now', '-1 day')
-                ORDER BY fa.priority DESC, fa.last_processed_date NULLS FIRST
+                INNER JOIN unarchived_counts uc ON fa.author_name = uc.author
+                ORDER BY fa.priority DESC,
+                         uc.last_attempt ASC
                 LIMIT 1
             """)
             
@@ -330,8 +340,8 @@ class ArchiveSubmitter:
             if not author:
                 return
                 
-            author_name, priority, last_processed = author
-            logger.info(f"Processing favorite author: {author_name} (priority: {priority})")
+            author_name, priority, unarchived_count = author
+            logger.info(f"Processing favorite author: {author_name} (priority: {priority}, unarchived: {unarchived_count})")
             
             # Get unarchived images for this author in batches
             self.cursor.execute("""
@@ -346,13 +356,6 @@ class ArchiveSubmitter:
             
             images = self.cursor.fetchall()
             if not images:
-                # Update last processed date if no images to process
-                self.cursor.execute("""
-                    UPDATE favorite_authors
-                    SET last_processed_date = datetime('now')
-                    WHERE author_name = ?
-                """, (author_name,))
-                self.conn.commit()
                 return
                 
             logger.info(f"Found {len(images)} unarchived images for favorite author {author_name} in this batch.")
@@ -374,47 +377,8 @@ class ArchiveSubmitter:
                         logger.info(f"Submitted favorite author image to archive.ph: {page_url}")
                         self.update_submission_status(page_url, 'pending', 'archive.ph')
                 
-                # # Also submit author page if available
-                # if author_url:
-                #     # Check author page
-                #     archived_org_author, _ = self.check_archive_org(author_url)
-                #     archived_ph_author, _ = self.check_archive_ph(author_url)
+                time.sleep(5)  # Rate limiting
                     
-                #     if not archived_org_author:
-                #         if self.submit_to_archive_org(author_url):
-                #             logger.info(f"Submitted author page to archive.org: {author_url}")
-                #             self.update_submission_status(author_url, 'pending', 'archive.org')
-                    
-                #     if not archived_ph_author:
-                #         if self.submit_to_archive_ph(author_url):
-                #             logger.info(f"Submitted author page to archive.ph: {author_url}")
-                #             self.update_submission_status(author_url, 'pending', 'archive.ph')
-                    
-                #     # Submit author details page
-                #     details_url = f"{author_url}/details"
-                #     archived_org_details, _ = self.check_archive_org(details_url)
-                #     archived_ph_details, _ = self.check_archive_ph(details_url)
-                    
-                #     if not archived_org_details:
-                #         if self.submit_to_archive_org(details_url):
-                #             logger.info(f"Submitted author details to archive.org: {details_url}")
-                #             self.update_submission_status(details_url, 'pending', 'archive.org')
-                    
-                #     if not archived_ph_details:
-                #         if self.submit_to_archive_ph(details_url):
-                #             logger.info(f"Submitted author details to archive.ph: {details_url}")
-                #             self.update_submission_status(details_url, 'pending', 'archive.ph')
-                
-                # time.sleep(5)  # Rate limiting
-            
-            # Update last processed date after processing batch
-            self.cursor.execute("""
-                UPDATE favorite_authors
-                SET last_processed_date = datetime('now')
-                WHERE author_name = ?
-            """, (author_name,))
-            self.conn.commit()
-                
         except Exception as e:
             logger.error(f"Error processing favorite authors: {e}")
 
