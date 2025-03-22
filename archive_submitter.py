@@ -8,6 +8,7 @@ from datetime import datetime
 from urllib.parse import quote_plus
 import argparse
 from indafoto import check_for_updates
+from bs4 import BeautifulSoup
 
 # Configure logging
 logging.basicConfig(
@@ -25,7 +26,10 @@ ARCHIVE_SAMPLE_RATE = 0.005  # 0.5% sample rate for image pages
 CHECK_INTERVAL = 5  # 5 seconds between full cycles
 TASK_INTERVAL = 5  # 5 seconds between different task types
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15'
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Connection': 'keep-alive'
 }
 
 class ArchiveSubmitter:
@@ -34,6 +38,62 @@ class ArchiveSubmitter:
         self.cursor = self.conn.cursor()
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
+        
+        # Ensure the archive_service column exists
+        self._ensure_db_schema()
+        
+    def _ensure_db_schema(self):
+        """Ensure the database schema is up to date with any new columns."""
+        try:
+            # Check if archive_service column exists
+            self.cursor.execute("PRAGMA table_info(archive_submissions)")
+            columns = self.cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            
+            if 'archive_service' not in column_names:
+                # Add the column
+                logger.info("Adding archive_service column to archive_submissions table")
+                self.cursor.execute("""
+                    ALTER TABLE archive_submissions
+                    ADD COLUMN archive_service TEXT
+                """)
+                self.conn.commit()
+                logger.info("Successfully added archive_service column")
+                
+            if 'is_archived' not in column_names:
+                # Add the is_archived column
+                logger.info("Adding is_archived column to archive_submissions table")
+                self.cursor.execute("""
+                    ALTER TABLE archive_submissions
+                    ADD COLUMN is_archived INTEGER DEFAULT 0
+                """)
+                # Update the column for any existing successful records
+                self.cursor.execute("""
+                    UPDATE archive_submissions
+                    SET is_archived = 1
+                    WHERE status = 'success'
+                """)
+                self.conn.commit()
+                logger.info("Successfully added is_archived column")
+                
+            # Check if the composite index exists
+            self.cursor.execute("PRAGMA index_list(archive_submissions)")
+            indexes = self.cursor.fetchall()
+            index_names = [idx[1] for idx in indexes]
+            
+            if 'idx_archive_submissions_url_service' not in index_names:
+                # Create the composite unique index
+                logger.info("Creating composite index for url and archive_service")
+                self.cursor.execute("""
+                    CREATE UNIQUE INDEX idx_archive_submissions_url_service 
+                    ON archive_submissions(url, archive_service)
+                """)
+                self.conn.commit()
+                logger.info("Successfully created composite index")
+                
+        except Exception as e:
+            logger.error(f"Error ensuring database schema: {e}")
+            self.conn.rollback()
         
     def check_archive_org(self, url):
         """Check if URL is already archived on archive.org using CDX API."""
@@ -58,7 +118,7 @@ class ArchiveSubmitter:
         """Check if URL is already archived on archive.ph using Memento TimeMap."""
         try:
             timemap_url = f"https://archive.ph/timemap/{url}"
-            response = self.session.get(timemap_url, timeout=60)
+            response = self.session.get(timemap_url, headers=HEADERS, timeout=60)
             if response.ok:
                 lines = response.text.strip().split('\n')
                 if len(lines) > 1:
@@ -73,6 +133,252 @@ class ArchiveSubmitter:
         except Exception as e:
             logger.error(f"Failed to check archive.ph for {url}: {e}")
             return False, None
+
+    def fetch_archive_ph_listings(self, domain="indafoto.hu", max_pages=10):
+        """
+        Fetch and parse the archive.ph listings for a domain.
+        
+        Args:
+            domain: The domain to search archives for
+            max_pages: Maximum number of pages to fetch (20 items per page)
+            
+        Returns:
+            A list of tuples (original_url, archive_url, timestamp)
+        """
+        results = []
+        offset = 0
+        
+        try:
+            # Get the most recent archive we've already recorded
+            self.cursor.execute("""
+                SELECT MIN(submission_date) 
+                FROM archive_submissions 
+                WHERE archive_service = 'archive.ph' AND status = 'success'
+            """)
+            newest_timestamp = self.cursor.fetchone()[0]
+            if newest_timestamp:
+                newest_date = datetime.strptime(newest_timestamp.split('.')[0], '%Y-%m-%d %H:%M:%S')
+            else:
+                newest_date = None
+                
+            # Track if we've seen any items newer than our newest record
+            found_new_items = True
+            
+            for page in range(max_pages):
+                if not found_new_items:
+                    break
+                    
+                logger.info(f"Fetching archive.ph listing page {page+1}/{max_pages} (offset={offset})")
+                url = f"https://archive.ph/offset={offset}/" if offset > 0 else "https://archive.ph/"
+                url += domain
+                
+                response = self.session.get(url, headers=HEADERS, timeout=60)
+                if not response.ok:
+                    logger.error(f"Failed to fetch archive.ph listing page {page+1}: {response.status_code}")
+                    break
+                
+                soup = BeautifulSoup(response.text, "html.parser")
+                
+                # Each row has an id like "row0", "row1", etc.
+                # Each row contains a link to the archived page and the original URL
+                rows = soup.select("div[id^='row']")
+                
+                if not rows:
+                    logger.info(f"No more items found on page {page+1}")
+                    break
+                
+                for row in rows:
+                    try:
+                        # The title and archive URL are in the first link in the TEXT-BLOCK
+                        text_block = row.select_one(".TEXT-BLOCK")
+                        if not text_block:
+                            continue
+                            
+                        archive_link = text_block.select_one("a[href^='https://archive.ph/']")
+                        if not archive_link:
+                            continue
+                            
+                        archive_url = archive_link.get('href')
+                        
+                        # The original URL is in the second link
+                        original_link = text_block.select("a")[1] if len(text_block.select("a")) > 1 else None
+                        if not original_link:
+                            continue
+                            
+                        original_url = original_link.get('href').replace('https://archive.ph/https://', 'https://')
+                        
+                        # Skip non-indafoto.hu URLs
+                        if domain not in original_url:
+                            continue
+                            
+                        # The timestamp is in the THUMBS-BLOCK
+                        thumbs_block = row.select_one(".THUMBS-BLOCK")
+                        if not thumbs_block:
+                            continue
+                            
+                        timestamp_div = thumbs_block.select_one("div[style*='white-space:nowrap']")
+                        if not timestamp_div:
+                            continue
+                            
+                        timestamp_str = timestamp_div.get_text().strip()
+                            
+                        # Parse the timestamp (format: "22 Mar 2025 21:00")
+                        try:
+                            timestamp = datetime.strptime(timestamp_str, "%d %b %Y %H:%M")
+                                
+                            # If we have a newest date and this item is older, we can stop
+                            if newest_date and timestamp < newest_date:
+                                continue
+                                
+                            found_new_items = True
+                                
+                            results.append((original_url, archive_url, timestamp))
+                        except ValueError:
+                            logger.warning(f"Could not parse timestamp: {timestamp_str}")
+                    except Exception as e:
+                        logger.error(f"Error parsing archive item: {e}")
+                
+                # Move to the next page
+                offset += 20
+                time.sleep(2)  # Be nice to the server
+                
+        except Exception as e:
+            logger.error(f"Error fetching archive.ph listings: {e}")
+            
+        return results
+        
+    def fetch_archive_org_listings(self, domain="indafoto.hu", limit=10000):
+        """
+        Fetch archived URLs from archive.org for a domain using the CDX API.
+        
+        Args:
+            domain: The domain to search archives for
+            limit: Maximum number of results to retrieve
+            
+        Returns:
+            A list of tuples (original_url, archive_url, timestamp)
+        """
+        results = []
+        
+        try:
+            # Get the most recent archive we've already recorded
+            self.cursor.execute("""
+                SELECT MIN(submission_date) 
+                FROM archive_submissions 
+                WHERE archive_service = 'archive.org' AND status = 'success'
+            """)
+            newest_timestamp = self.cursor.fetchone()[0]
+            if newest_timestamp:
+                newest_date = datetime.strptime(newest_timestamp.split('.')[0], '%Y-%m-%d %H:%M:%S')
+            else:
+                newest_date = None
+            
+            cdx_url = f"https://web.archive.org/cdx/search/cdx?url={domain}/*&output=json&limit={limit}"
+            logger.info(f"Fetching archive.org CDX data for {domain}")
+            
+            response = self.session.get(cdx_url, timeout=120)  # Longer timeout as this can be slow
+            if not response.ok:
+                logger.error(f"Failed to fetch archive.org CDX data: {response.status_code}")
+                return results
+                
+            data = response.json()
+            
+            # Skip the header row
+            if len(data) <= 1:
+                logger.info("No archive.org data found")
+                return results
+                
+            header = data[0]
+            timestamp_idx = header.index("timestamp")
+            original_idx = header.index("original")
+            
+            for row in data[1:]:
+                timestamp_str = row[timestamp_idx]
+                original_url = row[original_idx]
+                
+                # Parse the timestamp (format: YYYYMMDDhhmmss)
+                try:
+                    timestamp = datetime.strptime(timestamp_str, "%Y%m%d%H%M%S")
+                    
+                    # If we have a newest date and this item is older, skip it
+                    if newest_date and timestamp < newest_date:
+                        continue
+                        
+                    archive_url = f"https://web.archive.org/web/{timestamp_str}/{original_url}"
+                    results.append((original_url, archive_url, timestamp))
+                except ValueError:
+                    logger.warning(f"Could not parse timestamp: {timestamp_str}")
+            
+        except Exception as e:
+            logger.error(f"Error fetching archive.org listings: {e}")
+            
+        return results
+
+    def update_archives_from_listings(self):
+        """
+        Fetch archive listings from both services and update our database.
+        This handles both URLs we submitted and URLs archived by others.
+        """
+        try:
+            # Get archive.ph listings
+            ph_listings = self.fetch_archive_ph_listings()
+            logger.info(f"Found {len(ph_listings)} archive.ph listings")
+            
+            # Get archive.org listings
+            org_listings = self.fetch_archive_org_listings()
+            logger.info(f"Found {len(org_listings)} archive.org listings")
+            
+            # Process all listings
+            total_updated = 0
+            
+            # Process archive.ph listings
+            for original_url, archive_url, timestamp in ph_listings:
+                self.update_archive_from_listing(original_url, archive_url, 'archive.ph', timestamp)
+                total_updated += 1
+                
+            # Process archive.org listings
+            for original_url, archive_url, timestamp in org_listings:
+                self.update_archive_from_listing(original_url, archive_url, 'archive.org', timestamp)
+                total_updated += 1
+                
+            logger.info(f"Updated {total_updated} entries from archive listings")
+            
+        except Exception as e:
+            logger.error(f"Error updating archives from listings: {e}")
+            
+    def update_archive_from_listing(self, url, archive_url, service, timestamp):
+        """Update the archive_submissions table with data from archive.org or archive.ph listings."""
+        try:
+            # Convert timestamp to string format if it's a datetime object
+            if isinstance(timestamp, datetime):
+                submission_date = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                submission_date = str(timestamp)
+                
+            # First check if the is_archived column exists
+            self.cursor.execute("PRAGMA table_info(archive_submissions)")
+            columns = self.cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            
+            if 'is_archived' in column_names:
+                # Use the is_archived column
+                self.cursor.execute("""
+                    INSERT OR REPLACE INTO archive_submissions 
+                    (url, archive_url, archive_service, submission_date, status, is_archived) 
+                    VALUES (?, ?, ?, ?, 'success', 1)
+                """, (url, archive_url, service, submission_date))
+            else:
+                # Fallback to the old schema without is_archived
+                self.cursor.execute("""
+                    INSERT OR REPLACE INTO archive_submissions 
+                    (url, archive_url, archive_service, submission_date, status) 
+                    VALUES (?, ?, ?, ?, 'success')
+                """, (url, archive_url, service, submission_date))
+                
+            self.conn.commit()
+            logger.info(f"Added new successful submission for {url} in {service}")
+        except Exception as e:
+            logger.error(f"Error updating archive from listing for {url}: {e}")
 
     def submit_to_archive_org(self, url):
         """Submit URL to archive.org."""
@@ -90,6 +396,7 @@ class ArchiveSubmitter:
             data = {'url': url}
             response = self.session.post('https://archive.ph/submit/', 
                                   data=data, 
+                                  headers=HEADERS,
                                   timeout=60)
             return response.ok
         except Exception as e:
@@ -103,9 +410,13 @@ class ArchiveSubmitter:
             self.cursor.execute("""
                 SELECT DISTINCT i.author_url 
                 FROM images i 
-                LEFT JOIN archive_submissions a ON i.author_url = a.url 
+                LEFT JOIN (
+                    SELECT url, MAX(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as is_archived
+                    FROM archive_submissions
+                    GROUP BY url
+                ) a ON i.author_url = a.url 
                 WHERE i.author_url IS NOT NULL 
-                AND (a.id IS NULL OR (a.status = 'failed' AND a.retry_count < 3))
+                AND (a.url IS NULL OR a.is_archived = 0)
             """)
             
             author_urls = self.cursor.fetchall()
@@ -153,10 +464,16 @@ class ArchiveSubmitter:
         try:
             # Get authors and their image counts
             self.cursor.execute("""
-                SELECT i.author, COUNT(*) as total_images,
-                       SUM(CASE WHEN a.status = 'success' THEN 1 ELSE 0 END) as archived_images
+                SELECT 
+                    i.author, 
+                    COUNT(*) as total_images,
+                    SUM(CASE WHEN a.is_archived > 0 THEN 1 ELSE 0 END) as archived_images
                 FROM images i
-                LEFT JOIN archive_submissions a ON i.page_url = a.url
+                LEFT JOIN (
+                    SELECT url, MAX(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as is_archived
+                    FROM archive_submissions
+                    GROUP BY url
+                ) a ON i.page_url = a.url
                 GROUP BY i.author
             """)
             
@@ -169,8 +486,12 @@ class ArchiveSubmitter:
                     self.cursor.execute("""
                         SELECT i.page_url
                         FROM images i
-                        LEFT JOIN archive_submissions a ON i.page_url = a.url
-                        WHERE i.author = ? AND (a.id IS NULL OR a.status = 'failed')
+                        LEFT JOIN (
+                            SELECT url, MAX(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as is_archived
+                            FROM archive_submissions
+                            GROUP BY url
+                        ) a ON i.page_url = a.url
+                        WHERE i.author = ? AND (a.url IS NULL OR a.is_archived = 0)
                         ORDER BY RANDOM()
                         LIMIT ?
                     """, (author, target_archives - archived_images))
@@ -198,22 +519,26 @@ class ArchiveSubmitter:
     def verify_pending_submissions(self):
         """Check status of pending submissions."""
         try:
+            # Update archives from both services' listings
+            self.update_archives_from_listings()
+            
             # Get submissions that are pending and were submitted more than 5 minutes ago
             self.cursor.execute("""
-                SELECT url, submission_date, type
+                SELECT url, submission_date, archive_service
                 FROM archive_submissions
                 WHERE status = 'pending'
                 AND datetime(submission_date) <= datetime('now', '-5 minutes')
             """)
             
-            for url, submission_date, url_type in self.cursor.fetchall():
-                # Check both archives
-                archived_org, archive_org_url = self.check_archive_org(url)
-                archived_ph, archive_ph_url = self.check_archive_ph(url)
+            for url, submission_date, service in self.cursor.fetchall():
+                # Check the appropriate archive
+                if service == 'archive.org':
+                    archived, archive_url = self.check_archive_org(url)
+                else:  # archive.ph
+                    archived, archive_url = self.check_archive_ph(url)
                 
-                if archived_org or archived_ph:
-                    archive_url = archive_org_url or archive_ph_url
-                    self.update_submission_status(url, 'success', archive_url=archive_url)
+                if archived:
+                    self.update_submission_status(url, 'success', service, archive_url=archive_url)
                     logger.info(f"Verified successful archive: {url} -> {archive_url}")
                 else:
                     # Update retry count and potentially mark as failed
@@ -222,8 +547,8 @@ class ArchiveSubmitter:
                         SET retry_count = retry_count + 1,
                             status = CASE WHEN retry_count >= 2 THEN 'failed' ELSE 'pending' END,
                             last_attempt = datetime('now')
-                        WHERE url = ?
-                    """, (url,))
+                        WHERE url = ? AND archive_service = ?
+                    """, (url, service))
                     self.conn.commit()
                 
                 time.sleep(1)  # Rate limiting for API calls
@@ -235,13 +560,38 @@ class ArchiveSubmitter:
         """Update or insert archive submission status."""
         try:
             self.cursor.execute("""
-                INSERT INTO archive_submissions (url, submission_date, status, archive_url)
-                VALUES (?, datetime('now'), ?, ?)
-                ON CONFLICT(url) DO UPDATE SET
+                INSERT INTO archive_submissions (url, submission_date, status, archive_url, archive_service)
+                VALUES (?, datetime('now'), ?, ?, ?)
+                ON CONFLICT(url, archive_service) DO UPDATE SET
                     status = excluded.status,
                     archive_url = COALESCE(excluded.archive_url, archive_submissions.archive_url),
                     last_attempt = datetime('now')
-            """, (url, status, archive_url))
+            """, (url, status, archive_url, service))
+            self.conn.commit()
+        except sqlite3.IntegrityError:
+            # If we have a constraint error, we need to try again with a more specific approach
+            # This can happen if the unique constraint is on URL only
+            self.cursor.execute("""
+                SELECT id FROM archive_submissions WHERE url = ? AND archive_service = ?
+            """, (url, service))
+            
+            existing_id = self.cursor.fetchone()
+            if existing_id:
+                # Update existing record
+                self.cursor.execute("""
+                    UPDATE archive_submissions
+                    SET status = ?,
+                        archive_url = COALESCE(?, archive_url),
+                        last_attempt = datetime('now')
+                    WHERE id = ?
+                """, (status, archive_url, existing_id[0]))
+            else:
+                # Insert new record
+                self.cursor.execute("""
+                    INSERT INTO archive_submissions 
+                    (url, submission_date, status, archive_url, archive_service, retry_count)
+                    VALUES (?, datetime('now'), ?, ?, ?, 0)
+                """, (url, status, archive_url, service))
             self.conn.commit()
         except Exception as e:
             logger.error(f"Error updating submission status for {url}: {e}")
@@ -255,8 +605,12 @@ class ArchiveSubmitter:
                 SELECT DISTINCT i.page_url, i.author_url
                 FROM images i
                 JOIN marked_images m ON i.id = m.image_id
-                LEFT JOIN archive_submissions a ON i.page_url = a.url
-                WHERE (a.id IS NULL OR (a.status = 'failed' AND a.retry_count < 3))
+                LEFT JOIN (
+                    SELECT url, MAX(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as is_archived
+                    FROM archive_submissions
+                    GROUP BY url
+                ) a ON i.page_url = a.url
+                WHERE a.url IS NULL OR a.is_archived = 0
             """)
             
             marked_images = self.cursor.fetchall()
@@ -324,10 +678,14 @@ class ArchiveSubmitter:
                     SELECT 
                         i.author,
                         COUNT(*) as total_images,
-                        SUM(CASE WHEN a.status = 'success' THEN 1 ELSE 0 END) as archived_images,
-                        COUNT(*) - SUM(CASE WHEN a.status = 'success' THEN 1 ELSE 0 END) as unarchived_count
+                        SUM(CASE WHEN a.is_archived > 0 THEN 1 ELSE 0 END) as archived_images,
+                        COUNT(*) - SUM(CASE WHEN a.is_archived > 0 THEN 1 ELSE 0 END) as unarchived_count
                     FROM images i
-                    LEFT JOIN archive_submissions a ON i.page_url = a.url
+                    LEFT JOIN (
+                        SELECT url, MAX(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as is_archived
+                        FROM archive_submissions
+                        GROUP BY url
+                    ) a ON i.page_url = a.url
                     GROUP BY i.author
                 )
                 SELECT 
@@ -360,9 +718,13 @@ class ArchiveSubmitter:
             self.cursor.execute("""
                 SELECT i.page_url, i.author_url
                 FROM images i
-                LEFT JOIN archive_submissions a ON i.page_url = a.url
+                LEFT JOIN (
+                    SELECT url, MAX(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as is_archived
+                    FROM archive_submissions
+                    GROUP BY url
+                ) a ON i.page_url = a.url
                 WHERE i.author = ? 
-                AND (a.id IS NULL OR (a.status = 'failed' AND a.retry_count < 3))
+                AND (a.url IS NULL OR a.is_archived = 0)
                 ORDER BY RANDOM()
                 LIMIT 60
             """, (author_name,))
@@ -427,18 +789,47 @@ class ArchiveSubmitter:
                 logger.error(f"Error in main loop: {e}")
                 time.sleep(CHECK_INTERVAL)
 
+    def close(self):
+        """Close database connection."""
+        if hasattr(self, 'conn') and self.conn:
+            self.conn.close()
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Indafoto Archive Submitter')
     parser.add_argument('--no-update-check', action='store_true',
                        help='Skip checking for updates')
+    parser.add_argument('--fetch-archived', action='store_true', help='Only fetch existing archives without submitting new pages')
     args = parser.parse_args()
     
+    if not args.no_update_check:
+        check_for_updates(__file__)
+
+    submitter = ArchiveSubmitter()
     try:
-        # Check for updates unless explicitly disabled
-        if not args.no_update_check:
-            check_for_updates(__file__)
+        if args.fetch_archived:
+            logger.info("Fetching existing archives...")
+            # Fetch archive.org listings
+            org_listings = submitter.fetch_archive_org_listings()
+            logger.info(f"Found {len(org_listings)} archive.org listings")
+
+            # Process archive.org listings
+            for original_url, archive_url, timestamp in org_listings:
+                submitter.update_archive_from_listing(original_url, archive_url, 'archive.org', timestamp)
+
+            # Get archive.ph listings
+            ph_listings = submitter.fetch_archive_ph_listings()
+            logger.info(f"Found {len(ph_listings)} archive.ph listings")
+
+            # Process archive.ph listings
+            for original_url, archive_url, timestamp in ph_listings:
+                submitter.update_archive_from_listing(original_url, archive_url, 'archive.ph', timestamp)
             
-        submitter = ArchiveSubmitter()
-        submitter.run()
+            logger.info("Finished fetching archives.")
+        else:
+            submitter.run()
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
     except Exception as e:
-        logger.critical(f"Unexpected error occurred: {e}", exc_info=True) 
+        logger.exception(f"Unhandled exception: {e}")
+    finally:
+        submitter.close() 
