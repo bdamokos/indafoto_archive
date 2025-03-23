@@ -1711,10 +1711,10 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                                 # Process collections
                                 for gallery in metadata.get('collections', []):
                                     if metadata.get('collections') and len(metadata.get('collections')) > 0:
-                                        logger.info(f"Found {len(metadata['collections'])} collections for image: {metadata.get('title', 'Untitled')}")
+                                        logger.debug(f"Found {len(metadata['collections'])} collections for image: {metadata.get('title', 'Untitled')}")
                                         for i, collection in enumerate(metadata.get('collections')):
                                             if i == 0:  # Log only the first collection to avoid log spam
-                                                logger.info(f"  - Collection: {collection['title']} (ID: {collection['id']})")
+                                                logger.debug(f"  - Collection: {collection['title']} (ID: {collection['id']})")
                                 
                                     cursor.execute("""
                                         INSERT OR IGNORE INTO collections (collection_id, title, url, is_public)
@@ -1732,10 +1732,10 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                                 # Process albums
                                 for gallery in metadata.get('albums', []):
                                     if metadata.get('albums') and len(metadata.get('albums')) > 0:
-                                        logger.info(f"Found {len(metadata['albums'])} albums for image: {metadata.get('title', 'Untitled')}")
+                                        logger.debug(f"Found {len(metadata['albums'])} albums for image: {metadata.get('title', 'Untitled')}")
                                         for i, album in enumerate(metadata.get('albums')):
                                             if i == 0:  # Log only the first album to avoid log spam
-                                                logger.info(f"  - Album: {album['title']} (ID: {album['id']})")
+                                                logger.debug(f"  - Album: {album['title']} (ID: {album['id']})")
                                 
                                     cursor.execute("""
                                         INSERT OR IGNORE INTO albums (album_id, title, url, is_public)
@@ -1753,10 +1753,10 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                                 # Process tags
                                 for tag in metadata.get('tags', []):
                                     if metadata.get('tags') and len(metadata.get('tags')) > 0:
-                                        logger.info(f"Found {len(metadata['tags'])} tags for image: {metadata.get('title', 'Untitled')}")
+                                        logger.debug(f"Found {len(metadata['tags'])} tags for image: {metadata.get('title', 'Untitled')}")
                                         for i, tag_item in enumerate(metadata.get('tags')):
                                             if i == 0:  # Log only the first tag to avoid log spam
-                                                logger.info(f"  - Tag: {tag_item['name']} (Count: {tag_item['count']})")
+                                                logger.debug(f"  - Tag: {tag_item['name']} (Count: {tag_item['count']})")
                                 
                                     cursor.execute("""
                                         INSERT OR IGNORE INTO tags (name, count)
