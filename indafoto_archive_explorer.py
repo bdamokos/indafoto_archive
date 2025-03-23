@@ -538,17 +538,21 @@ def serve_image(image_path):
         # URL decode the path first
         decoded_path = unquote(image_path)
         
+        # Convert URL path separators to OS-specific path separators
+        decoded_path = decoded_path.replace('/', os.path.sep)
+        
         # Normalize the path to prevent path traversal
         normalized_path = os.path.normpath(decoded_path)
         
-        # Validate the path structure
-        if '..' in normalized_path or normalized_path.startswith('/'):
+        # Validate the path structure (using os.path.sep for platform independence)
+        if '..' in normalized_path or normalized_path.startswith(os.path.sep):
             logger.error(f"Invalid path structure detected: {normalized_path}")
             abort(404)
             
-        # Remove indafoto_archive prefix if it exists
-        if normalized_path.startswith('indafoto_archive/'):
-            normalized_path = normalized_path[len('indafoto_archive/'):]
+        # Remove indafoto_archive prefix if it exists (using os.path.sep)
+        indafoto_prefix = f"indafoto_archive{os.path.sep}"
+        if normalized_path.startswith(indafoto_prefix):
+            normalized_path = normalized_path[len(indafoto_prefix):]
             
         # Construct the full path and ensure it's within the base directory
         full_path = os.path.join(base_path, normalized_path)
