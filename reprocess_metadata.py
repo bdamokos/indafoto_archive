@@ -90,10 +90,10 @@ def process_metadata_without_download(image_id, page_url, conn, cursor, session=
         
         # Process collections
         if metadata.get('collections'):
-            logger.info(f"Found {len(metadata['collections'])} collections for image: {metadata.get('title', 'Untitled')}")
+            logger.info(f"Found {len(metadata['collections'])} collections for image:")
             for i, collection in enumerate(metadata.get('collections')):
-                if i == 0:  # Log only the first collection to avoid log spam
-                    logger.info(f"  - Collection: {collection['title']} (ID: {collection['id']})")
+                # if i == 0:  # Log only the first collection to avoid log spam
+                #     logger.info(f"  - Collection: {collection['title']} (ID: {collection['id']})")
                 
                 try:
                     cursor.execute("""
@@ -115,10 +115,10 @@ def process_metadata_without_download(image_id, page_url, conn, cursor, session=
         
         # Process albums
         if metadata.get('albums'):
-            logger.info(f"Found {len(metadata['albums'])} albums for image: {metadata.get('title', 'Untitled')}")
+            logger.info(f"Found {len(metadata['albums'])} albums for image")
             for i, album in enumerate(metadata.get('albums')):
-                if i == 0:  # Log only the first album to avoid log spam
-                    logger.info(f"  - Album: {album['title']} (ID: {album['id']})")
+                # if i == 0:  # Log only the first album to avoid log spam
+                #     logger.info(f"  - Album: {album['title']} (ID: {album['id']})")
                 
                 try:
                     cursor.execute("""
@@ -140,10 +140,10 @@ def process_metadata_without_download(image_id, page_url, conn, cursor, session=
         
         # Process tags
         if metadata.get('tags'):
-            logger.info(f"Found {len(metadata['tags'])} tags for image: {metadata.get('title', 'Untitled')}")
+            logger.info(f"Found {len(metadata['tags'])} tags for image")
             for i, tag in enumerate(metadata.get('tags')):
-                if i == 0:  # Log only the first tag to avoid log spam
-                    logger.info(f"  - Tag: {tag['name']} (Count: {tag['count']})")
+                # if i == 0:  # Log only the first tag to avoid log spam
+                #     logger.info(f"  - Tag: {tag['name']} (Count: {tag['count']})")
                 
                 try:
                     cursor.execute("""
@@ -257,7 +257,7 @@ def reprocess_missing_metadata(batch_size=100, concurrent_sessions=5):
                 # Use session from pool in a round-robin fashion
                 session = session_pool[idx % concurrent_sessions]
                 
-                logger.info(f"Fetching metadata for image: {title or 'Untitled'} (ID: {image_id})")
+                logger.info(f"Fetching metadata for image ID: {image_id})")
                 # Process metadata for this image using our helper function
                 success, stats = process_metadata_without_download(image_id, page_url, conn, cursor, session)
                 
