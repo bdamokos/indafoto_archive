@@ -1067,39 +1067,39 @@ class ArchiveSubmitter:
                         except Exception as ph_e:
                             logger.error(f"Error submitting marked image to archive.ph for {page_url}: {ph_e}")
                     
-                    # Also submit author page if available
-                    if author_url:
-                        try:
-                            # Check author page
-                            archived_org_author, _ = self.check_archive_org(author_url)
-                            archived_ph_author, _ = self.check_archive_ph(author_url)
+                    # # Also submit author page if available
+                    # if author_url:
+                    #     try:
+                    #         # Check author page
+                    #         archived_org_author, _ = self.check_archive_org(author_url)
+                    #         archived_ph_author, _ = self.check_archive_ph(author_url)
                             
-                            if not archived_org_author:
-                                if self.submit_to_archive_org(author_url):
-                                    logger.info(f"Submitted author page to archive.org: {author_url}")
-                                    self.update_submission_status(author_url, 'pending', 'archive.org')
+                    #         if not archived_org_author:
+                    #             if self.submit_to_archive_org(author_url):
+                    #                 logger.info(f"Submitted author page to archive.org: {author_url}")
+                    #                 self.update_submission_status(author_url, 'pending', 'archive.org')
                             
-                            if not archived_ph_author:
-                                if self.submit_to_archive_ph(author_url):
-                                    logger.info(f"Submitted author page to archive.ph: {author_url}")
-                                    self.update_submission_status(author_url, 'pending', 'archive.ph')
+                    #         if not archived_ph_author:
+                    #             if self.submit_to_archive_ph(author_url):
+                    #                 logger.info(f"Submitted author page to archive.ph: {author_url}")
+                    #                 self.update_submission_status(author_url, 'pending', 'archive.ph')
                             
-                            # Submit author details page
-                            details_url = f"{author_url}/details"
-                            archived_org_details, _ = self.check_archive_org(details_url)
-                            archived_ph_details, _ = self.check_archive_ph(details_url)
+                    #         # Submit author details page
+                    #         details_url = f"{author_url}/details"
+                    #         archived_org_details, _ = self.check_archive_org(details_url)
+                    #         archived_ph_details, _ = self.check_archive_ph(details_url)
                             
-                            if not archived_org_details:
-                                if self.submit_to_archive_org(details_url):
-                                    logger.info(f"Submitted author details to archive.org: {details_url}")
-                                    self.update_submission_status(details_url, 'pending', 'archive.org')
+                    #         if not archived_org_details:
+                    #             if self.submit_to_archive_org(details_url):
+                    #                 logger.info(f"Submitted author details to archive.org: {details_url}")
+                    #                 self.update_submission_status(details_url, 'pending', 'archive.org')
                             
-                            if not archived_ph_details:
-                                if self.submit_to_archive_ph(details_url):
-                                    logger.info(f"Submitted author details to archive.ph: {details_url}")
-                                    self.update_submission_status(details_url, 'pending', 'archive.ph')
-                        except Exception as author_e:
-                            logger.error(f"Error processing author pages for {author_url}: {author_e}")
+                    #         if not archived_ph_details:
+                    #             if self.submit_to_archive_ph(details_url):
+                    #                 logger.info(f"Submitted author details to archive.ph: {details_url}")
+                    #                 self.update_submission_status(details_url, 'pending', 'archive.ph')
+                    #     except Exception as author_e:
+                    #         logger.error(f"Error processing author pages for {author_url}: {author_e}")
                     
                     time.sleep(2.5)  # Rate limiting
                 except Exception as img_e:
