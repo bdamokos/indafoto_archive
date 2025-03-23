@@ -140,6 +140,24 @@ def init_db():
     )
     """)
     
+    # Check if type column exists in archive_submissions table
+    type_column_exists = False
+    try:
+        cursor.execute("SELECT type FROM archive_submissions LIMIT 1")
+        type_column_exists = True
+    except sqlite3.OperationalError:
+        # Column doesn't exist
+        pass
+    
+    # Add type column to archive_submissions if it doesn't exist
+    if not type_column_exists:
+        try:
+            cursor.execute("ALTER TABLE archive_submissions ADD COLUMN type TEXT DEFAULT 'image_page'")
+            conn.commit()
+            logger.info("Added 'type' column to archive_submissions table")
+        except sqlite3.OperationalError as e:
+            logger.error(f"Error adding type column to archive_submissions: {e}")
+    
     # Migrate existing notes to the new table
     try:
         cursor.execute("""

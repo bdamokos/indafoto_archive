@@ -6,7 +6,11 @@
 <div class="row">
     <div class="col-md-8">
         <div class="card">
+            {% if image.local_path %}
             <img src="{{ url_for('serve_image', image_path=image.local_path) }}" class="card-img-top" alt="{{ image.title }}">
+            {% else %}
+            <img src="{{ url_for('static', filename='images/placeholder.svg') }}" class="card-img-top" alt="Missing image - {{ image.title }}">
+            {% endif %}
             <div class="card-body">
                 <h2 class="card-title">{{ image.title }}</h2>
                 <p class="card-text">

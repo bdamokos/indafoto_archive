@@ -57,9 +57,15 @@
         <div class="col">
             <div class="card h-100 image-card">
                 <a href="{{ url_for('view_image', image_id=image.id) }}">
+                    {% if image.local_path %}
                     <img src="{{ url_for('serve_image', image_path=image.local_path) }}" 
                          class="card-img-top" 
                          alt="{{ image.title }}">
+                    {% else %}
+                    <img src="{{ url_for('static', filename='images/placeholder.svg') }}"
+                         class="card-img-top"
+                         alt="Missing image - {{ image.title }}">
+                    {% endif %}
                 </a>
                 <div class="card-body">
                     <h6 class="card-title text-truncate">{{ image.title }}</h6>

@@ -59,7 +59,8 @@ class ArchiveSubmitter:
                         archive_service TEXT NOT NULL,
                         retry_count INTEGER DEFAULT 0,
                         last_attempt TEXT,
-                        is_archived INTEGER DEFAULT 0
+                        is_archived INTEGER DEFAULT 0,
+                        type TEXT
                     )
                 """)
                 # Create the composite unique index
@@ -108,6 +109,29 @@ class ArchiveSubmitter:
                 self.conn.commit()
                 logger.info("Successfully added is_archived column")
                 
+            if 'type' not in column_names:
+                # Add the type column
+                logger.info("Adding type column to archive_submissions table")
+                self.cursor.execute("""
+                    ALTER TABLE archive_submissions
+                    ADD COLUMN type TEXT DEFAULT 'image_page'
+                """)
+                # Update existing records with type based on URL pattern
+                self.cursor.execute("""
+                    UPDATE archive_submissions
+                    SET type = 
+                        CASE 
+                            WHEN url LIKE '%/details' THEN 'author_details'
+                            WHEN url LIKE '%/image/%' THEN 'image_page'
+                            WHEN url LIKE '%indafoto.hu/%' AND 
+                                 (url NOT LIKE '%/%/%' OR url LIKE '%/albums' OR url LIKE '%/collections') 
+                                 THEN 'author_page'
+                            ELSE 'image_page'
+                        END
+                """)
+                self.conn.commit()
+                logger.info("Successfully added type column and updated existing records")
+                
             # Check if the composite index exists
             self.cursor.execute("PRAGMA index_list(archive_submissions)")
             indexes = self.cursor.fetchall()
@@ -151,6 +175,29 @@ class ArchiveSubmitter:
             logger.error(f"Error ensuring database schema: {e}")
             self.conn.rollback()
         
+    def _determine_url_type(self, url):
+        """
+        Determine the type of URL based on its pattern.
+        Returns specific types for known patterns or None for unknown patterns.
+        """
+        if url.endswith('/details'):
+            return 'author_details'
+        elif '/image/' in url:
+            return 'image_page'
+        elif '/albums/' in url:
+            return 'album_page'
+        elif '/collections/' in url:
+            return 'collection_page'
+        elif 'indafoto.hu/' in url:
+            # Check for author pages - these have format indafoto.hu/author_name
+            # and don't have additional path components
+            author_match = re.match(r'https?://indafoto\.hu/([^/]+)/?$', url)
+            if author_match:
+                return 'author_page'
+        
+        # Return None for unrecognized patterns
+        return None
+
     def check_archive_org(self, url):
         """Check if URL is already archived on archive.org using CDX API."""
         try:
@@ -576,20 +623,30 @@ class ArchiveSubmitter:
             else:
                 submission_date = str(timestamp)
                 
+            # Determine the URL type
+            url_type = self._determine_url_type(url)
+                
             # First check if the is_archived column exists
             self.cursor.execute("PRAGMA table_info(archive_submissions)")
             columns = self.cursor.fetchall()
             column_names = [col[1] for col in columns]
             
-            if 'is_archived' in column_names:
-                # Use the is_archived column
+            if 'is_archived' in column_names and 'type' in column_names and url_type:
+                # Use the is_archived column and type
+                self.cursor.execute("""
+                    INSERT OR REPLACE INTO archive_submissions 
+                    (url, archive_url, archive_service, submission_date, status, is_archived, type) 
+                    VALUES (?, ?, ?, ?, 'success', 1, ?)
+                """, (url, archive_url, service, submission_date, url_type))
+            elif 'is_archived' in column_names:
+                # Fallback to the old schema with is_archived but without type
                 self.cursor.execute("""
                     INSERT OR REPLACE INTO archive_submissions 
                     (url, archive_url, archive_service, submission_date, status, is_archived) 
                     VALUES (?, ?, ?, ?, 'success', 1)
                 """, (url, archive_url, service, submission_date))
             else:
-                # Fallback to the old schema without is_archived
+                # Fallback to the old schema without is_archived and type
                 self.cursor.execute("""
                     INSERT OR REPLACE INTO archive_submissions 
                     (url, archive_url, archive_service, submission_date, status) 
@@ -873,22 +930,51 @@ class ArchiveSubmitter:
             
             existing_id = self.cursor.fetchone()
             
+            # Determine URL type
+            url_type = self._determine_url_type(url)
+            
             if existing_id:
                 # Update existing record
-                self.cursor.execute("""
-                    UPDATE archive_submissions
-                    SET status = ?,
-                        archive_url = COALESCE(?, archive_url),
-                        last_attempt = datetime('now')
-                    WHERE id = ?
-                """, (status, archive_url, existing_id[0]))
+                if url_type:
+                    self.cursor.execute("""
+                        UPDATE archive_submissions
+                        SET status = ?,
+                            archive_url = COALESCE(?, archive_url),
+                            last_attempt = datetime('now'),
+                            type = ?
+                        WHERE id = ?
+                    """, (status, archive_url, url_type, existing_id[0]))
+                else:
+                    # Don't update type if we can't determine it
+                    self.cursor.execute("""
+                        UPDATE archive_submissions
+                        SET status = ?,
+                            archive_url = COALESCE(?, archive_url),
+                            last_attempt = datetime('now')
+                        WHERE id = ?
+                    """, (status, archive_url, existing_id[0]))
             else:
                 # Check if is_archived column exists
                 self.cursor.execute("PRAGMA table_info(archive_submissions)")
                 columns = self.cursor.fetchall()
                 column_names = [col[1] for col in columns]
                 
-                if 'is_archived' in column_names:
+                if 'is_archived' in column_names and 'type' in column_names:
+                    # Insert with is_archived column and type
+                    if url_type:
+                        self.cursor.execute("""
+                            INSERT INTO archive_submissions 
+                            (url, submission_date, status, archive_url, archive_service, retry_count, is_archived, type)
+                            VALUES (?, datetime('now'), ?, ?, ?, 0, CASE WHEN ? = 'success' THEN 1 ELSE 0 END, ?)
+                        """, (url, status, archive_url, service, status, url_type))
+                    else:
+                        # Insert without type if we can't determine it
+                        self.cursor.execute("""
+                            INSERT INTO archive_submissions 
+                            (url, submission_date, status, archive_url, archive_service, retry_count, is_archived)
+                            VALUES (?, datetime('now'), ?, ?, ?, 0, CASE WHEN ? = 'success' THEN 1 ELSE 0 END)
+                        """, (url, status, archive_url, service, status))
+                elif 'is_archived' in column_names:
                     # Insert with is_archived column
                     self.cursor.execute("""
                         INSERT INTO archive_submissions 
@@ -908,13 +994,25 @@ class ArchiveSubmitter:
             logger.warning(f"SQLite integrity error when updating {url} for {service}: {e}")
             # Try one more time with a direct approach
             try:
-                self.cursor.execute("""
-                    UPDATE archive_submissions
-                    SET status = ?,
-                        archive_url = COALESCE(?, archive_url),
-                        last_attempt = datetime('now')
-                    WHERE url = ? AND archive_service = ?
-                """, (status, archive_url, url, service))
+                url_type = self._determine_url_type(url)
+                if url_type:
+                    self.cursor.execute("""
+                        UPDATE archive_submissions
+                        SET status = ?,
+                            archive_url = COALESCE(?, archive_url),
+                            last_attempt = datetime('now'),
+                            type = ?
+                        WHERE url = ? AND archive_service = ?
+                    """, (status, archive_url, url_type, url, service))
+                else:
+                    # Don't update type if we can't determine it
+                    self.cursor.execute("""
+                        UPDATE archive_submissions
+                        SET status = ?,
+                            archive_url = COALESCE(?, archive_url),
+                            last_attempt = datetime('now')
+                        WHERE url = ? AND archive_service = ?
+                    """, (status, archive_url, url, service))
                 self.conn.commit()
                 logger.info(f"Successfully updated existing record for {url} on {service}")
             except Exception as inner_e:
@@ -1139,9 +1237,85 @@ class ArchiveSubmitter:
         except Exception as e:
             logger.error(f"Error processing archived URLs: {e}")
 
+    def fix_missing_type_categorizations(self):
+        """
+        Find and fix records with missing or potentially incorrect type categorizations.
+        This should be run periodically to ensure correct categorization.
+        """
+        try:
+            logger.info("Starting to fix missing or incorrect URL type categorizations")
+            
+            # Check if the type column exists
+            self.cursor.execute("PRAGMA table_info(archive_submissions)")
+            columns = self.cursor.fetchall()
+            column_names = [col[1] for col in columns]
+            
+            if 'type' not in column_names:
+                logger.warning("Type column doesn't exist yet, ensuring schema first")
+                self._ensure_db_schema()
+                # If column was just added, the default update should have already run
+                return
+            
+            # Get all URLs without a type or with a default type
+            self.cursor.execute("""
+                SELECT id, url 
+                FROM archive_submissions
+                WHERE type IS NULL OR type = ''
+            """)
+            
+            records = self.cursor.fetchall()
+            if not records:
+                logger.info("No records with missing type categorization found")
+                return
+                
+            logger.info(f"Found {len(records)} records with missing type categorization")
+            
+            # Process each record
+            updates = 0
+            for record_id, url in records:
+                url_type = self._determine_url_type(url)
+                if url_type:
+                    self.cursor.execute("""
+                        UPDATE archive_submissions
+                        SET type = ?
+                        WHERE id = ?
+                    """, (url_type, record_id))
+                    updates += 1
+            
+            # Also check for records that might have incorrect 'image_page' defaults
+            self.cursor.execute("""
+                SELECT id, url 
+                FROM archive_submissions
+                WHERE type = 'image_page' AND url NOT LIKE '%/image/%'
+            """)
+            
+            potential_wrong_types = self.cursor.fetchall()
+            if potential_wrong_types:
+                logger.info(f"Found {len(potential_wrong_types)} records with potentially incorrect 'image_page' categorization")
+                
+                for record_id, url in potential_wrong_types:
+                    url_type = self._determine_url_type(url)
+                    if url_type and url_type != 'image_page':
+                        self.cursor.execute("""
+                            UPDATE archive_submissions
+                            SET type = ?
+                            WHERE id = ?
+                        """, (url_type, record_id))
+                        updates += 1
+            
+            self.conn.commit()
+            logger.info(f"Updated type categorization for {updates} records")
+            
+        except Exception as e:
+            logger.error(f"Error fixing type categorizations: {e}")
+            self.conn.rollback()
+
     def run(self):
         """Main loop for the archive submitter."""
         logger.info("Starting archive submitter service")
+        
+        # Run the fix for missing type categorizations on startup
+        self.fix_missing_type_categorizations()
         
         while True:
             try:
@@ -1166,6 +1340,9 @@ class ArchiveSubmitter:
                 
                 logger.info("Processing archived URLs...")
                 self.process_archived_urls()
+                
+                # Run the type categorization fix periodically
+                self.fix_missing_type_categorizations()
                 
                 logger.info(f"Sleeping for {CHECK_INTERVAL} seconds...")
                 time.sleep(CHECK_INTERVAL)
