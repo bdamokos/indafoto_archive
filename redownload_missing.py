@@ -2,15 +2,18 @@
 """
 This script redownloads images that are missing their local paths (i.e. they are in the database but not on the disk)
 It uses the indafoto.py script to download the images and extract metadata.
+If an image cannot be downloaded, it marks it for archiving using the marked_images table.
+If on subsequent runs the image still fails but is confirmed to be archived, it will be deleted from the database.
 """
 
 
 import sqlite3
 import logging
-from indafoto import download_image, extract_metadata, create_session, check_for_updates
+from indafoto import download_image, extract_metadata, create_session, check_for_updates, delete_image_data
 import os
 from tqdm import tqdm
 import argparse
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(
@@ -32,10 +35,12 @@ def redownload_missing_images():
     
     # Get all images without local paths
     cursor.execute("""
-        SELECT id, url, page_url, author
-        FROM images
-        WHERE local_path IS NULL
-        ORDER BY id
+        SELECT i.id, i.url, i.page_url, i.author,
+               (SELECT COUNT(*) FROM marked_images m WHERE m.image_id = i.id) as is_marked,
+               (SELECT COUNT(*) FROM archive_submissions a WHERE a.url = i.page_url AND a.status = 'success') as is_archived
+        FROM images i
+        WHERE i.local_path IS NULL
+        ORDER BY i.id
     """)
     
     images = cursor.fetchall()
@@ -51,16 +56,36 @@ def redownload_missing_images():
     # Keep track of results
     success_count = 0
     failed_count = 0
+    marked_for_archive_count = 0
+    deleted_count = 0
     
     try:
         for image in tqdm(images, desc="Redownloading missing images", colour='yellow'):
-            image_id, url, page_url, author = image
+            image_id, url, page_url, author, is_marked, is_archived = image
+            
+            # If marked for archive previously and archived successfully, delete it
+            if is_marked and is_archived > 0:
+                logger.info(f"Image {image_id} was marked and has been archived. Deleting from database.")
+                delete_image_data(conn, cursor, image_id)
+                deleted_count += 1
+                continue
             
             try:
                 # Get fresh metadata from the page
                 metadata = extract_metadata(page_url, session=session)
                 if not metadata:
                     logger.error(f"Failed to get metadata for {page_url}")
+                    
+                    # Mark for archive if not already marked
+                    if not is_marked:
+                        cursor.execute("""
+                            INSERT INTO marked_images (image_id, marked_date)
+                            VALUES (?, ?)
+                        """, (image_id, datetime.now().isoformat()))
+                        conn.commit()
+                        logger.info(f"Marked image {image_id} for archiving")
+                        marked_for_archive_count += 1
+                    
                     failed_count += 1
                     continue
                 
@@ -69,6 +94,17 @@ def redownload_missing_images():
                 
                 if not new_path:
                     logger.error(f"Failed to download {url}")
+                    
+                    # Mark for archive if not already marked
+                    if not is_marked:
+                        cursor.execute("""
+                            INSERT INTO marked_images (image_id, marked_date)
+                            VALUES (?, ?)
+                        """, (image_id, datetime.now().isoformat()))
+                        conn.commit()
+                        logger.info(f"Marked image {image_id} for archiving")
+                        marked_for_archive_count += 1
+                    
                     failed_count += 1
                     continue
                 
@@ -84,6 +120,17 @@ def redownload_missing_images():
                 
             except Exception as e:
                 logger.error(f"Error processing {url}: {e}")
+                
+                # Mark for archive if not already marked
+                if not is_marked:
+                    cursor.execute("""
+                        INSERT INTO marked_images (image_id, marked_date)
+                        VALUES (?, ?)
+                    """, (image_id, datetime.now().isoformat()))
+                    conn.commit()
+                    logger.info(f"Marked image {image_id} for archiving")
+                    marked_for_archive_count += 1
+                
                 failed_count += 1
                 continue
                 
@@ -96,6 +143,8 @@ def redownload_missing_images():
     logger.info(f"Total images processed: {len(images)}")
     logger.info(f"Successfully downloaded: {success_count}")
     logger.info(f"Failed: {failed_count}")
+    logger.info(f"Newly marked for archive: {marked_for_archive_count}")
+    logger.info(f"Deleted (archived): {deleted_count}")
     
     conn.close()
 
