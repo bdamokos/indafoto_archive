@@ -19,3 +19,4 @@ indafoto.db-shm
 ._indafoto.db-shm
 
 ._*
+reprocess_metadata.log
