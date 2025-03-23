@@ -22,12 +22,27 @@ from indafoto import (
     logger as indafoto_logger
 )
 
+# Configure Windows console for UTF-8 support if on Windows
+if sys.platform.startswith('win'):
+    try:
+        import ctypes
+        # Set console code page to UTF-8
+        if ctypes.windll.kernel32.GetConsoleOutputCP() != 65001:
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+            ctypes.windll.kernel32.SetConsoleCP(65001)
+        # For Python 3.6+ in Windows, ensure stdout/stderr use UTF-8
+        sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='backslashreplace')
+    except Exception as e:
+        print(f"Warning: Could not configure Windows console for UTF-8: {e}")
+        print("Some characters may not display correctly.")
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('reprocess_metadata.log'),
+        logging.FileHandler('reprocess_metadata.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
