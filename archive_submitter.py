@@ -60,7 +60,8 @@ class ArchiveSubmitter:
                         retry_count INTEGER DEFAULT 0,
                         last_attempt TEXT,
                         is_archived INTEGER DEFAULT 0,
-                        type TEXT
+                        type TEXT,
+                        error TEXT
                     )
                 """)
                 # Create the composite unique index
@@ -71,7 +72,78 @@ class ArchiveSubmitter:
                 self.conn.commit()
                 logger.info("Created archive_submissions table with proper schema")
                 return
+            
+            # Check for and remove NOT NULL constraints if they cause problems
+            # Check if the table has NOT NULL constraints that might need to be relaxed
+            try:
+                # Try to insert a record with NULL values to see if constraints are an issue
+                self.cursor.execute("""
+                    INSERT INTO archive_submissions 
+                    (url, submission_date, status, archive_service)
+                    VALUES (?, ?, ?, ?)
+                """, ('test_url_for_constraint_check', 'test_date', 'test_status', None))
                 
+                # If we reached here, the NOT NULL constraint isn't enforced for archive_service
+                # Delete the test record
+                self.cursor.execute("DELETE FROM archive_submissions WHERE url = 'test_url_for_constraint_check'")
+                self.conn.commit()
+            except sqlite3.IntegrityError as e:
+                if 'NOT NULL constraint failed' in str(e):
+                    logger.info("Detected NOT NULL constraints issue. Will fix by recreating table without constraints...")
+                    
+                    # Backup the current table
+                    self.cursor.execute("ALTER TABLE archive_submissions RENAME TO archive_submissions_old")
+                    
+                    # Create a new table without NOT NULL constraints
+                    self.cursor.execute("""
+                        CREATE TABLE archive_submissions (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            url TEXT,
+                            submission_date TEXT,
+                            status TEXT,
+                            archive_url TEXT,
+                            archive_service TEXT,
+                            retry_count INTEGER DEFAULT 0,
+                            last_attempt TEXT,
+                            is_archived INTEGER DEFAULT 0,
+                            type TEXT,
+                            error TEXT
+                        )
+                    """)
+                    
+                    # Copy data from the old table to the new table
+                    self.cursor.execute("""
+                        INSERT INTO archive_submissions
+                        SELECT 
+                            id,
+                            url,
+                            submission_date,
+                            status,
+                            archive_url,
+                            archive_service,
+                            retry_count,
+                            last_attempt,
+                            is_archived,
+                            type,
+                            NULL as error
+                        FROM archive_submissions_old
+                    """)
+                    
+                    # Create the composite unique index
+                    self.cursor.execute("""
+                        CREATE UNIQUE INDEX idx_archive_submissions_url_service 
+                        ON archive_submissions(url, archive_service)
+                    """)
+                    
+                    # Drop the old table
+                    self.cursor.execute("DROP TABLE archive_submissions_old")
+                    
+                    self.conn.commit()
+                    logger.info("Fixed NOT NULL constraints by recreating table with relaxed constraints")
+                else:
+                    # If it's another integrity error, rollback and continue
+                    self.conn.rollback()
+            
             # Check if archive_service column exists
             self.cursor.execute("PRAGMA table_info(archive_submissions)")
             columns = self.cursor.fetchall()
@@ -131,6 +203,16 @@ class ArchiveSubmitter:
                 """)
                 self.conn.commit()
                 logger.info("Successfully added type column and updated existing records")
+            
+            if 'error' not in column_names:
+                # Add the error column
+                logger.info("Adding error column to archive_submissions table")
+                self.cursor.execute("""
+                    ALTER TABLE archive_submissions
+                    ADD COLUMN error TEXT
+                """)
+                self.conn.commit()
+                logger.info("Successfully added error column")
                 
             # Check if the composite index exists
             self.cursor.execute("PRAGMA index_list(archive_submissions)")
@@ -759,16 +841,16 @@ class ArchiveSubmitter:
                 archived_org, archive_org_url = self.check_archive_org(author_url)
                 if archived_org:
                     # Update our database that it's already archived
-                    self.update_submission_status(author_url, 'success', archive_org_url, 'archive.org')
+                    self.update_submission_status(author_url, 'success', 'archive.org', archive_org_url)
                     logger.info(f"Author URL already in archive.org: {author_url} -> {archive_org_url}")
                 else:
                     # Not archived, submit it
-                    archive_org_url = self.submit_to_archive_org(author_url)
-                    if archive_org_url:
-                        self.update_submission_status(author_url, 'success', archive_org_url, 'archive.org')
-                        logger.info(f"Successfully submitted author URL to archive.org: {author_url} -> {archive_org_url}")
+                    success = self.submit_to_archive_org(author_url)
+                    if success:
+                        self.update_submission_status(author_url, 'pending', 'archive.org')
+                        logger.info(f"Successfully submitted author URL to archive.org: {author_url}")
                     else:
-                        self.update_submission_status(author_url, 'failed', None, 'archive.org')
+                        self.update_submission_status(author_url, 'failed', 'archive.org')
                         logger.error(f"Failed to submit author URL to archive.org: {author_url}")
                 
                 # Also check author details page
@@ -778,16 +860,16 @@ class ArchiveSubmitter:
                 archived_org, archive_org_url = self.check_archive_org(details_url)
                 if archived_org:
                     # Update our database that it's already archived
-                    self.update_submission_status(details_url, 'success', archive_org_url, 'archive.org')
+                    self.update_submission_status(details_url, 'success', 'archive.org', archive_org_url)
                     logger.info(f"Details URL already in archive.org: {details_url} -> {archive_org_url}")
                 else:
                     # Not archived, submit it
-                    archive_org_url = self.submit_to_archive_org(details_url)
-                    if archive_org_url:
-                        self.update_submission_status(details_url, 'success', archive_org_url, 'archive.org')
-                        logger.info(f"Successfully submitted details URL to archive.org: {details_url} -> {archive_org_url}")
+                    success = self.submit_to_archive_org(details_url)
+                    if success:
+                        self.update_submission_status(details_url, 'pending', 'archive.org')
+                        logger.info(f"Successfully submitted details URL to archive.org: {details_url}")
                     else:
-                        self.update_submission_status(details_url, 'failed', None, 'archive.org')
+                        self.update_submission_status(details_url, 'failed', 'archive.org')
                         logger.error(f"Failed to submit details URL to archive.org: {details_url}")
                 
                 # Sleep to avoid rate limiting
@@ -958,12 +1040,32 @@ class ArchiveSubmitter:
                         WHERE id = ?
                     """, (status, archive_url, existing_id[0]))
             else:
-                # Check if is_archived column exists
+                # Ensure service has a value
+                if service is None:
+                    logger.warning(f"Service parameter is None for URL {url}, defaulting to 'archive.org'")
+                    service = 'archive.org'
+                    
+                # Check if is_archived and error columns exist
                 self.cursor.execute("PRAGMA table_info(archive_submissions)")
                 columns = self.cursor.fetchall()
                 column_names = [col[1] for col in columns]
                 
-                if 'is_archived' in column_names and 'type' in column_names:
+                if 'is_archived' in column_names and 'type' in column_names and 'error' in column_names:
+                    # Insert with is_archived column, type, and error
+                    if url_type:
+                        self.cursor.execute("""
+                            INSERT INTO archive_submissions 
+                            (url, submission_date, status, archive_url, archive_service, retry_count, is_archived, type, error)
+                            VALUES (?, datetime('now'), ?, ?, ?, 0, CASE WHEN ? = 'success' THEN 1 ELSE 0 END, ?, NULL)
+                        """, (url, status, archive_url, service, status, url_type))
+                    else:
+                        # Insert without type if we can't determine it
+                        self.cursor.execute("""
+                            INSERT INTO archive_submissions 
+                            (url, submission_date, status, archive_url, archive_service, retry_count, is_archived, error)
+                            VALUES (?, datetime('now'), ?, ?, ?, 0, CASE WHEN ? = 'success' THEN 1 ELSE 0 END, NULL)
+                        """, (url, status, archive_url, service, status))
+                elif 'is_archived' in column_names and 'type' in column_names:
                     # Insert with is_archived column and type
                     if url_type:
                         self.cursor.execute("""
@@ -998,6 +1100,11 @@ class ArchiveSubmitter:
             logger.warning(f"SQLite integrity error when updating {url} for {service}: {e}")
             # Try one more time with a direct approach
             try:
+                # Ensure service has a value
+                if service is None:
+                    logger.warning(f"Service parameter is None for URL {url}, defaulting to 'archive.org'")
+                    service = 'archive.org'
+                    
                 url_type = self._determine_url_type(url)
                 if url_type:
                     self.cursor.execute("""
@@ -1005,18 +1112,20 @@ class ArchiveSubmitter:
                         SET status = ?,
                             archive_url = COALESCE(?, archive_url),
                             last_attempt = datetime('now'),
-                            type = ?
-                        WHERE url = ? AND archive_service = ?
-                    """, (status, archive_url, url_type, url, service))
+                            type = ?,
+                            archive_service = ?
+                        WHERE url = ? AND (archive_service = ? OR archive_service IS NULL)
+                    """, (status, archive_url, url_type, service, url, service))
                 else:
                     # Don't update type if we can't determine it
                     self.cursor.execute("""
                         UPDATE archive_submissions
                         SET status = ?,
                             archive_url = COALESCE(?, archive_url),
-                            last_attempt = datetime('now')
-                        WHERE url = ? AND archive_service = ?
-                    """, (status, archive_url, url, service))
+                            last_attempt = datetime('now'),
+                            archive_service = ?
+                        WHERE url = ? AND (archive_service = ? OR archive_service IS NULL)
+                    """, (status, archive_url, service, url, service))
                 self.conn.commit()
                 logger.info(f"Successfully updated existing record for {url} on {service}")
             except Exception as inner_e:
