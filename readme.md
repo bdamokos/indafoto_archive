@@ -362,6 +362,7 @@ If problems persist, please report the issue with the error message from the log
 | | `--retry` | Retry previously failed pages | False | `--retry` |
 | | `--workers N` | Set number of parallel download workers | 8 | `--workers 4` |
 | | `--auto-restart` | Enable automatic restart every 24 hours | False | `--auto-restart` |
+| | `--no-error-restart` | Disable automatic restart even in case of errors | False | `--no-error-restart` |
 | | `--no-update-check` | Skip checking for updates | False | `--no-update-check` |
 | **Author Management** |
 | | `--redownload-author NAME` | Redownload all images from a specific author | None | `--redownload-author "john_doe"` |
