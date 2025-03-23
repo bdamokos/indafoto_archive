@@ -55,7 +55,9 @@ def process_metadata_without_download(image_id, page_url, conn, cursor, session=
             success: Boolean indicating if the operation was successful
             stats: Dictionary containing metadata statistics
     """
+    # We expect a session to be provided - don't create a new one as it defeats the purpose of session pooling
     if not session:
+        logger.warning("No session provided to process_metadata_without_download, creating a new one")
         session = create_session()
     
     tags_count = 0
@@ -166,12 +168,13 @@ def process_metadata_without_download(image_id, page_url, conn, cursor, session=
         "albums_count": albums_count
     }
 
-def reprocess_missing_metadata(batch_size=100):
+def reprocess_missing_metadata(batch_size=100, concurrent_sessions=5):
     """
     Reprocess metadata for images that don't have tags, collections, or albums.
     
     Args:
         batch_size: Number of images to process in each batch to avoid memory issues
+        concurrent_sessions: Number of concurrent HTTP sessions to use
     """
     # Use the init_db function from indafoto.py to ensure all tables exist
     conn = init_db()
@@ -209,8 +212,12 @@ def reprocess_missing_metadata(batch_size=100):
     total_images = len(images)
     logger.info(f"Found {total_images} images without tags, collections, or albums")
     
-    # Create a session to reuse for all requests
-    session = create_session()
+    # Create a session pool for better HTTP connection reuse
+    logger.info(f"Creating a pool of {concurrent_sessions} HTTP sessions")
+    session_pool = []
+    for i in range(concurrent_sessions):
+        session = create_session()
+        session_pool.append(session)
     
     # Track results
     success_count = 0
@@ -224,7 +231,7 @@ def reprocess_missing_metadata(batch_size=100):
             batch = images[i:i+batch_size]
             logger.info(f"Processing batch {i//batch_size + 1}/{(total_images + batch_size - 1)//batch_size}")
             
-            for image in tqdm(batch, desc="Reprocessing metadata", colour='green'):
+            for idx, image in enumerate(tqdm(batch, desc="Reprocessing metadata", colour='green')):
                 image_id, page_url, title, author = image
                 
                 if not page_url:
@@ -232,6 +239,10 @@ def reprocess_missing_metadata(batch_size=100):
                     failed_count += 1
                     continue
                 
+                # Use session from pool in a round-robin fashion
+                session = session_pool[idx % concurrent_sessions]
+                
+                logger.info(f"Fetching metadata for image: {title or 'Untitled'} (ID: {image_id})")
                 # Process metadata for this image using our helper function
                 success, stats = process_metadata_without_download(image_id, page_url, conn, cursor, session)
                 
@@ -246,8 +257,12 @@ def reprocess_missing_metadata(batch_size=100):
     except KeyboardInterrupt:
         logger.info("Process interrupted by user")
     finally:
-        # Clean up the session
-        session.close()
+        # Clean up all sessions
+        for session in session_pool:
+            try:
+                session.close()
+            except:
+                pass
     
     # Print summary
     logger.info("\nMetadata Reprocessing Summary:")
@@ -267,6 +282,8 @@ if __name__ == "__main__":
                         help='Skip checking for updates')
     parser.add_argument('--batch-size', type=int, default=100,
                         help='Number of images to process in each batch')
+    parser.add_argument('--concurrent-sessions', type=int, default=5,
+                        help='Number of concurrent HTTP sessions to use')
     args = parser.parse_args()
     
     try:
@@ -274,6 +291,6 @@ if __name__ == "__main__":
         if not args.no_update_check:
             check_for_updates(__file__)
             
-        reprocess_missing_metadata(batch_size=args.batch_size)
+        reprocess_missing_metadata(batch_size=args.batch_size, concurrent_sessions=args.concurrent_sessions)
     except Exception as e:
         logger.error(f"Unexpected error: {e}", exc_info=True) 
