@@ -133,6 +133,7 @@ def restart_script(error_restart=False):
     
     Args:
         error_restart: If True, restart regardless of auto-restart setting (for error handling)
+                       unless --no-error-restart is specified
     """
     global should_restart, restart_timer, args, restart_in_progress
     
@@ -143,8 +144,11 @@ def restart_script(error_restart=False):
             logger.info("Restart already in progress, skipping additional restart attempt")
             return
             
-        if not error_restart and not args.auto_restart:
-            logger.info("Auto-restart is disabled, continuing without restart")
+        # Skip restart if auto-restart is disabled and this is not an error restart
+        # OR if this is an error restart but no-error-restart is enabled
+        if (not error_restart and not args.auto_restart) or (error_restart and args.no_error_restart):
+            restart_type = "error-based" if error_restart else "time-based"
+            logger.info(f"{restart_type.capitalize()} restart is disabled, continuing without restart")
             return
             
         # Set the flag to prevent other threads from initiating restart
@@ -2311,6 +2315,8 @@ if __name__ == "__main__":
                        help='Skip checking for updates')
     parser.add_argument('--auto-restart', action='store_true',
                        help='Enable automatic restart every 24 hours (default: disabled)')
+    parser.add_argument('--no-error-restart', action='store_true',
+                       help='Disable automatic restart even in case of errors (default: enabled)')
     args = parser.parse_args()
     
     try:
