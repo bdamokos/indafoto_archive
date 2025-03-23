@@ -226,6 +226,16 @@ def restart_script(error_restart=False):
                 
         logger.info("Successfully cleaned up all threads and processes")
         
+        # Run redownload_missing.py to clean up any corrupted downloads
+        logger.info("Running redownload_missing.py to fix any missing or corrupted downloads...")
+        redownload_cmd = [str(Path(sys.executable)), "redownload_missing.py"]
+        # Use subprocess.run to wait for the redownload process to complete
+        try:
+            subprocess.run(redownload_cmd, check=True)
+            logger.info("Successfully completed redownload process")
+        except subprocess.SubprocessError as e:
+            logger.error(f"Error during redownload process: {e}")
+        
         # Start the new process with platform-appropriate creation flags
         creation_flags = 0
         if sys.platform == 'win32':
@@ -241,6 +251,13 @@ def restart_script(error_restart=False):
         logger.error(f"Error during cleanup: {cleanup_error}")
         # Still try to start new process and exit
         try:
+            # Try to run redownload_missing.py even if there were cleanup errors
+            try:
+                logger.info("Attempting to run redownload_missing.py despite cleanup errors...")
+                subprocess.run([str(Path(sys.executable)), "redownload_missing.py"], check=False)
+            except Exception as re_error:
+                logger.error(f"Failed to run redownload_missing.py: {re_error}")
+                
             subprocess.Popen(cmd, creationflags=creation_flags if sys.platform == 'win32' else 0)
             logger.info("New process started successfully despite cleanup errors")
         finally:
