@@ -39,12 +39,38 @@ class ArchiveSubmitter:
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
         
-        # Ensure the archive_service column exists
+        # Ensure the database schema is properly set up before anything else
         self._ensure_db_schema()
         
     def _ensure_db_schema(self):
         """Ensure the database schema is up to date with any new columns."""
         try:
+            # First check if the archive_submissions table exists
+            self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='archive_submissions'")
+            if not self.cursor.fetchone():
+                logger.info("Creating archive_submissions table - it doesn't exist")
+                self.cursor.execute("""
+                    CREATE TABLE archive_submissions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        url TEXT NOT NULL,
+                        submission_date TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        archive_url TEXT,
+                        archive_service TEXT NOT NULL,
+                        retry_count INTEGER DEFAULT 0,
+                        last_attempt TEXT,
+                        is_archived INTEGER DEFAULT 0
+                    )
+                """)
+                # Create the composite unique index
+                self.cursor.execute("""
+                    CREATE UNIQUE INDEX idx_archive_submissions_url_service 
+                    ON archive_submissions(url, archive_service)
+                """)
+                self.conn.commit()
+                logger.info("Created archive_submissions table with proper schema")
+                return
+                
             # Check if archive_service column exists
             self.cursor.execute("PRAGMA table_info(archive_submissions)")
             columns = self.cursor.fetchall()
@@ -55,7 +81,13 @@ class ArchiveSubmitter:
                 logger.info("Adding archive_service column to archive_submissions table")
                 self.cursor.execute("""
                     ALTER TABLE archive_submissions
-                    ADD COLUMN archive_service TEXT
+                    ADD COLUMN archive_service TEXT DEFAULT 'archive.org'
+                """)
+                # Update existing records to have a value
+                self.cursor.execute("""
+                    UPDATE archive_submissions
+                    SET archive_service = 'archive.org'
+                    WHERE archive_service IS NULL
                 """)
                 self.conn.commit()
                 logger.info("Successfully added archive_service column")
@@ -84,12 +116,36 @@ class ArchiveSubmitter:
             if 'idx_archive_submissions_url_service' not in index_names:
                 # Create the composite unique index
                 logger.info("Creating composite index for url and archive_service")
-                self.cursor.execute("""
-                    CREATE UNIQUE INDEX idx_archive_submissions_url_service 
-                    ON archive_submissions(url, archive_service)
-                """)
-                self.conn.commit()
-                logger.info("Successfully created composite index")
+                try:
+                    self.cursor.execute("""
+                        CREATE UNIQUE INDEX idx_archive_submissions_url_service 
+                        ON archive_submissions(url, archive_service)
+                    """)
+                    self.conn.commit()
+                    logger.info("Successfully created composite index")
+                except sqlite3.OperationalError as e:
+                    # This might fail if there are duplicate entries
+                    logger.warning(f"Could not create index directly: {e}")
+                    logger.info("Attempting to deduplicate entries before creating index")
+                    
+                    # Find and remove duplicates
+                    self.cursor.execute("""
+                        DELETE FROM archive_submissions
+                        WHERE id NOT IN (
+                            SELECT MIN(id)
+                            FROM archive_submissions
+                            GROUP BY url, archive_service
+                        )
+                    """)
+                    self.conn.commit()
+                    
+                    # Try creating the index again
+                    self.cursor.execute("""
+                        CREATE UNIQUE INDEX idx_archive_submissions_url_service 
+                        ON archive_submissions(url, archive_service)
+                    """)
+                    self.conn.commit()
+                    logger.info("Successfully created composite index after deduplication")
                 
         except Exception as e:
             logger.error(f"Error ensuring database schema: {e}")
@@ -99,19 +155,29 @@ class ArchiveSubmitter:
         """Check if URL is already archived on archive.org using CDX API."""
         try:
             # First check our database for existing successful submissions
-            self.cursor.execute("""
-                SELECT archive_url, submission_date
-                FROM archive_submissions
-                WHERE url = ? AND archive_service = 'archive.org' AND status = 'success'
-                ORDER BY submission_date DESC
-                LIMIT 1
-            """, (url,))
-            
-            result = self.cursor.fetchone()
-            if result:
-                archive_url, submission_date = result
-                logger.debug(f"Found {url} already verified in database for archive.org")
-                return True, archive_url
+            try:
+                self.cursor.execute("""
+                    SELECT archive_url, submission_date
+                    FROM archive_submissions
+                    WHERE url = ? AND archive_service = 'archive.org' AND status = 'success'
+                    ORDER BY submission_date DESC
+                    LIMIT 1
+                """, (url,))
+                
+                result = self.cursor.fetchone()
+                if result:
+                    archive_url, submission_date = result
+                    logger.debug(f"Found {url} already verified in database for archive.org")
+                    return True, archive_url
+            except sqlite3.OperationalError as e:
+                if 'no such column: archive_service' in str(e):
+                    # The column doesn't exist yet, ensure schema and retry once
+                    logger.warning("archive_service column not found, updating schema")
+                    self._ensure_db_schema()
+                    # Let's continue to external check after schema update
+                else:
+                    # Some other database error
+                    logger.error(f"Database error checking archive.org status: {e}")
             
             # If not in database, check externally
             check_url = f"https://web.archive.org/cdx/search/cdx?url={quote_plus(url)}&output=json"
@@ -134,19 +200,29 @@ class ArchiveSubmitter:
         """Check if URL is already archived on archive.ph using Memento TimeMap."""
         try:
             # First check our database for existing successful submissions
-            self.cursor.execute("""
-                SELECT archive_url, submission_date
-                FROM archive_submissions
-                WHERE url = ? AND archive_service = 'archive.ph' AND status = 'success'
-                ORDER BY submission_date DESC
-                LIMIT 1
-            """, (url,))
-            
-            result = self.cursor.fetchone()
-            if result:
-                archive_url, submission_date = result
-                logger.debug(f"Found {url} already verified in database for archive.ph")
-                return True, archive_url
+            try:
+                self.cursor.execute("""
+                    SELECT archive_url, submission_date
+                    FROM archive_submissions
+                    WHERE url = ? AND archive_service = 'archive.ph' AND status = 'success'
+                    ORDER BY submission_date DESC
+                    LIMIT 1
+                """, (url,))
+                
+                result = self.cursor.fetchone()
+                if result:
+                    archive_url, submission_date = result
+                    logger.debug(f"Found {url} already verified in database for archive.ph")
+                    return True, archive_url
+            except sqlite3.OperationalError as e:
+                if 'no such column: archive_service' in str(e):
+                    # The column doesn't exist yet, ensure schema and retry once
+                    logger.warning("archive_service column not found, updating schema")
+                    self._ensure_db_schema()
+                    # Let's continue to external check after schema update
+                else:
+                    # Some other database error
+                    logger.error(f"Database error checking archive.ph status: {e}")
             
             # If not in database, check externally
             timemap_url = f"https://archive.ph/timemap/{url}"
@@ -772,7 +848,24 @@ class ArchiveSubmitter:
     def update_submission_status(self, url, status, service=None, archive_url=None):
         """Update or insert archive submission status."""
         try:
-            # First check if record exists with this URL and service
+            # Ensure database schema is correct before proceeding
+            try:
+                # First check if record exists with this URL and service
+                self.cursor.execute("""
+                    SELECT id FROM archive_submissions 
+                    WHERE url = ? AND archive_service = ?
+                """, (url, service))
+            except sqlite3.OperationalError as e:
+                if 'no such column: archive_service' in str(e):
+                    # The column doesn't exist yet, ensure schema
+                    logger.warning("archive_service column not found, updating schema")
+                    self._ensure_db_schema()
+                    # Continue with updated schema
+                else:
+                    # Rethrow other errors
+                    raise
+            
+            # Try again with updated schema
             self.cursor.execute("""
                 SELECT id FROM archive_submissions 
                 WHERE url = ? AND archive_service = ?
@@ -790,12 +883,25 @@ class ArchiveSubmitter:
                     WHERE id = ?
                 """, (status, archive_url, existing_id[0]))
             else:
-                # Insert new record
-                self.cursor.execute("""
-                    INSERT INTO archive_submissions 
-                    (url, submission_date, status, archive_url, archive_service, retry_count, is_archived)
-                    VALUES (?, datetime('now'), ?, ?, ?, 0, CASE WHEN ? = 'success' THEN 1 ELSE 0 END)
-                """, (url, status, archive_url, service, status))
+                # Check if is_archived column exists
+                self.cursor.execute("PRAGMA table_info(archive_submissions)")
+                columns = self.cursor.fetchall()
+                column_names = [col[1] for col in columns]
+                
+                if 'is_archived' in column_names:
+                    # Insert with is_archived column
+                    self.cursor.execute("""
+                        INSERT INTO archive_submissions 
+                        (url, submission_date, status, archive_url, archive_service, retry_count, is_archived)
+                        VALUES (?, datetime('now'), ?, ?, ?, 0, CASE WHEN ? = 'success' THEN 1 ELSE 0 END)
+                    """, (url, status, archive_url, service, status))
+                else:
+                    # Fallback to inserting without is_archived
+                    self.cursor.execute("""
+                        INSERT INTO archive_submissions 
+                        (url, submission_date, status, archive_url, archive_service, retry_count)
+                        VALUES (?, datetime('now'), ?, ?, ?, 0)
+                    """, (url, status, archive_url, service))
             
             self.conn.commit()
         except sqlite3.IntegrityError as e:
