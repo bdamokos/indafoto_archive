@@ -180,6 +180,10 @@ class ArchiveSubmitter:
         Determine the type of URL based on its pattern.
         Returns specific types for known patterns or None for unknown patterns.
         """
+        # Handle None URLs
+        if url is None:
+            return None
+            
         if url.endswith('/details'):
             return 'author_details'
         elif '/image/' in url:
@@ -1272,15 +1276,30 @@ class ArchiveSubmitter:
             
             # Process each record
             updates = 0
+            errors = 0
             for record_id, url in records:
-                url_type = self._determine_url_type(url)
-                if url_type:
-                    self.cursor.execute("""
-                        UPDATE archive_submissions
-                        SET type = ?
-                        WHERE id = ?
-                    """, (url_type, record_id))
-                    updates += 1
+                try:
+                    url_type = self._determine_url_type(url)
+                    if url_type:
+                        self.cursor.execute("""
+                            UPDATE archive_submissions
+                            SET type = ?
+                            WHERE id = ?
+                        """, (url_type, record_id))
+                        updates += 1
+                    else:
+                        # If type can't be determined, set a default
+                        self.cursor.execute("""
+                            UPDATE archive_submissions
+                            SET type = 'unknown'
+                            WHERE id = ?
+                        """, (record_id,))
+                        updates += 1
+                except Exception as e:
+                    logger.error(f"Error processing record ID {record_id}, URL '{url}': {e}")
+                    errors += 1
+                    # Continue with next record
+                    continue
             
             # Also check for records that might have incorrect 'image_page' defaults
             self.cursor.execute("""
@@ -1294,17 +1313,23 @@ class ArchiveSubmitter:
                 logger.info(f"Found {len(potential_wrong_types)} records with potentially incorrect 'image_page' categorization")
                 
                 for record_id, url in potential_wrong_types:
-                    url_type = self._determine_url_type(url)
-                    if url_type and url_type != 'image_page':
-                        self.cursor.execute("""
-                            UPDATE archive_submissions
-                            SET type = ?
-                            WHERE id = ?
-                        """, (url_type, record_id))
-                        updates += 1
+                    try:
+                        url_type = self._determine_url_type(url)
+                        if url_type and url_type != 'image_page':
+                            self.cursor.execute("""
+                                UPDATE archive_submissions
+                                SET type = ?
+                                WHERE id = ?
+                            """, (url_type, record_id))
+                            updates += 1
+                    except Exception as e:
+                        logger.error(f"Error processing potential wrong type record ID {record_id}, URL '{url}': {e}")
+                        errors += 1
+                        # Continue with next record
+                        continue
             
             self.conn.commit()
-            logger.info(f"Updated type categorization for {updates} records")
+            logger.info(f"Updated type categorization for {updates} records, encountered {errors} errors")
             
         except Exception as e:
             logger.error(f"Error fixing type categorizations: {e}")
