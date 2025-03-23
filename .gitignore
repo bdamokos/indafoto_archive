@@ -16,3 +16,6 @@ sync.sh
 redownload_missing.log
 indafoto.db-wal
 indafoto.db-shm
+._indafoto.db-shm
+
+._*
