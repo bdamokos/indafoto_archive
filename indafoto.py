@@ -376,12 +376,32 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
-    # Set performance optimizing PRAGMAs
+    # Dynamically calculate SQLite memory parameters based on available system RAM
+    try:
+        # Get available system memory in bytes
+        available_memory = psutil.virtual_memory().available
+        total_memory = psutil.virtual_memory().total
+        
+        # Calculate cache size (in KB) - use up to 15% of available memory, max 200MB
+        cache_kb = min(int(available_memory * 0.15 / 1024), 200000)
+        
+        # Calculate mmap size (in bytes) - use up to 10% of available memory, max 500MB
+        mmap_bytes = min(int(available_memory * 0.10), 500 * 1024 * 1024)
+        
+        logger.info(f"System memory: {total_memory/1024/1024/1024:.2f}GB total, {available_memory/1024/1024/1024:.2f}GB available")
+        logger.info(f"SQLite memory allocation: {cache_kb/1024:.2f}MB cache, {mmap_bytes/1024/1024:.2f}MB mmap")
+    except Exception as e:
+        # Fallback to conservative values if memory detection fails
+        logger.warning(f"Could not determine system memory: {e}")
+        cache_kb = 20000  # 20MB
+        mmap_bytes = 20 * 1024 * 1024  # 20MB
+    
+    # Set performance optimizing PRAGMAs with dynamic memory values
     cursor.execute("PRAGMA journal_mode=WAL")  # Use Write-Ahead Logging for better concurrency
     cursor.execute("PRAGMA synchronous=NORMAL")  # Reduce fsync calls while maintaining safety
-    cursor.execute("PRAGMA cache_size=-1000000")  # Use 1GB of memory for cache (-ve number means kilobytes)
+    cursor.execute(f"PRAGMA cache_size=-{cache_kb}")  # Dynamic cache size (-ve means kilobytes)
     cursor.execute("PRAGMA temp_store=MEMORY")  # Store temp tables and indices in memory
-    cursor.execute("PRAGMA mmap_size=8589934592")  # Allow up to 8GB memory-mapped I/O (8 * 1024 * 1024 * 1024)
+    cursor.execute(f"PRAGMA mmap_size={mmap_bytes}")  # Dynamic memory-mapped I/O
     cursor.execute("PRAGMA page_size=4096")  # Optimal page size for most systems
     cursor.execute("PRAGMA busy_timeout=60000")  # Wait up to 60 seconds for locks
     
