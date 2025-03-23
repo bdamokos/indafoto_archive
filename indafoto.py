@@ -166,13 +166,27 @@ def restart_script(error_restart=False):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     try:
+        # First try to find the page with the latest completion date
         cursor.execute("""
-            SELECT MAX(page_number) 
+            SELECT page_number 
             FROM completed_pages
+            ORDER BY completion_date DESC
+            LIMIT 1
         """)
-        last_page = cursor.fetchone()[0]
-        next_page = (last_page + 1) if last_page is not None else 0
-        logger.info(f"Restarting from page {next_page}")
+        result = cursor.fetchone()
+        
+        if result:
+            next_page = result[0] + 1
+            logger.info(f"Restarting from page {next_page} (based on latest completion date)")
+        else:
+            # Fall back to the highest page number if no completion date is found
+            cursor.execute("""
+                SELECT MAX(page_number) 
+                FROM completed_pages
+            """)
+            last_page = cursor.fetchone()[0]
+            next_page = (last_page + 1) if last_page is not None else 0
+            logger.info(f"Restarting from page {next_page} (based on highest page number)")
     except Exception as e:
         logger.error(f"Error getting last page: {e}")
         next_page = 0
