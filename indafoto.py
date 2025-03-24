@@ -1776,6 +1776,22 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
         session = create_session(max_retries=3, pool_connections=current_workers)
         session_pool.put(session)
     
+    # Queue for next page's metadata
+    next_batch_queue = queue.Queue(maxsize=current_workers * 2)
+    db_check_queue = queue.Queue()
+    
+    # Track active tasks and completion status
+    active_tasks = {
+        'metadata': 0,
+        'download': 0,
+        'validation': 0
+    }
+    completion_status = {
+        'producer_done': False,
+        'metadata_done': False,
+        'all_tasks_done': False
+    }
+    
     def get_session():
         """Get a session from the pool with timeout."""
         try:
@@ -1842,69 +1858,111 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
     download_pool = ThreadPool(current_workers, "download")
     validation_pool = ThreadPool(current_workers, "validation")
     
-    try:
-        # First pass: check for duplicates and prepare work queue
-        image_ids_to_process = []
-        for image_data in image_data_list:
-            try:
-                url = image_data.get('image_url', '')
-                page_url = image_data.get('page_url', '')
-                
-                if not url or not page_url:
-                    logger.warning("Skipping image with no URL or page URL")
-                    failed_count += 1
-                    continue
-                
-                # Extract image ID from URL
-                image_id = extract_image_id(url)
-                if not image_id:
-                    logger.warning(f"Could not extract image ID from URL: {url}")
-                    failed_count += 1
-                    continue
-                
-                # Check if we already have this image
-                cursor.execute("""
-                    SELECT i.id, i.local_path, i.author 
-                    FROM images i 
-                    WHERE i.url LIKE ?
-                """, (f"%{image_id}%",))
-                existing = cursor.fetchone()
-                
-                if existing:
-                    logger.info(f"Image ID {image_id} already exists, skipping...")
-                    skipped_count += 1
-                    processed_count += 1
+    def metadata_producer():
+        """Producer function that feeds the metadata pool with new images."""
+        try:
+            for image_data in image_data_list:
+                try:
+                    url = image_data.get('image_url', '')
+                    page_url = image_data.get('page_url', '')
                     
-                    # Update author counts
-                    author = existing[2]
-                    author_image_counts[author] = author_image_counts.get(author, 0) + 1
-                    continue
-                
-                image_ids_to_process.append(image_data)
-            except Exception as e:
-                logger.error(f"Error checking image: {e}")
-                failed_count += 1
-                continue
+                    if not url or not page_url:
+                        db_check_queue.put(('error', image_data, "Skipping image with no URL or page URL"))
+                        continue
+                    
+                    # Extract image ID from URL
+                    image_id = extract_image_id(url)
+                    if not image_id:
+                        db_check_queue.put(('error', image_data, f"Could not extract image ID from URL: {url}"))
+                        continue
+                    
+                    # Queue the image for database check in main thread
+                    db_check_queue.put(('check', image_data, image_id))
+                except Exception as e:
+                    db_check_queue.put(('error', image_data, str(e)))
+        except Exception as e:
+            logger.error(f"Error in metadata producer: {e}")
+        finally:
+            # Signal end of input
+            db_check_queue.put(('done', None, None))
+            completion_status['producer_done'] = True
+    
+    try:
+        # Start the metadata producer in a separate thread
+        producer_thread = threading.Thread(target=metadata_producer)
+        producer_thread.daemon = True
+        producer_thread.start()
         
-        logger.info(f"Found {len(image_ids_to_process)} new images to process")
+        logger.info("Starting image processing pipeline")
         
         # Process images through the pipeline using thread pools
-        with tqdm(total=len(image_ids_to_process), desc="Processing images", colour='yellow') as pbar:
-            # Add metadata tasks
-            for image_data in image_ids_to_process:
-                if random.random() <= sample_rate:
-                    metadata_pool.add_task(process_metadata, image_data)
-            
+        with tqdm(total=len(image_data_list), desc="Processing images", colour='yellow') as pbar:
             # Process results and chain tasks
-            while processed_count + failed_count + banned_count < len(image_ids_to_process):
+            while not completion_status['all_tasks_done']:
+                # Check if all tasks are complete
+                if (completion_status['producer_done'] and
+                    active_tasks['metadata'] == 0 and 
+                    active_tasks['download'] == 0 and 
+                    active_tasks['validation'] == 0 and 
+                    db_check_queue.empty() and 
+                    next_batch_queue.empty()):
+                    completion_status['all_tasks_done'] = True
+                    break
+                
+                # Check database for next image
+                try:
+                    action, image_data, image_id = db_check_queue.get(timeout=1)
+                    if action == 'done':
+                        continue
+                    elif action == 'error':
+                        failed_count += 1
+                        pbar.update(1)
+                        continue
+                    
+                    # Check if we already have this image
+                    cursor.execute("""
+                        SELECT i.id, i.local_path, i.author 
+                        FROM images i 
+                        WHERE i.url LIKE ?
+                    """, (f"%{image_id}%",))
+                    existing = cursor.fetchone()
+                    
+                    if existing:
+                        logger.debug(f"Image ID {image_id} already exists, skipping...")
+                        skipped_count += 1
+                        processed_count += 1
+                        
+                        # Update author counts
+                        author = existing[2]
+                        author_image_counts[author] = author_image_counts.get(author, 0) + 1
+                        pbar.update(1)
+                        continue
+                    
+                    # Add to next batch queue for processing
+                    next_batch_queue.put(image_data)
+                except queue.Empty:
+                    pass
+                
+                # Process next batch
+                try:
+                    while not next_batch_queue.empty():
+                        image_data = next_batch_queue.get_nowait()
+                        if random.random() <= sample_rate:
+                            active_tasks['metadata'] += 1
+                            metadata_pool.add_task(process_metadata, image_data)
+                except queue.Empty:
+                    pass
+                
                 # Process metadata results
                 try:
                     while True:
                         result = metadata_pool.results.get_nowait()
+                        active_tasks['metadata'] -= 1
                         status, data = result
                         
                         if status == 'success':
                             download_url, metadata = data
+                            active_tasks['download'] += 1
                             download_pool.add_task(process_download, download_url, metadata)
                         elif status == 'banned':
                             banned_count += 1
@@ -1921,10 +1979,12 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 try:
                     while True:
                         result = download_pool.results.get_nowait()
+                        active_tasks['download'] -= 1
                         status, data = result
                         
                         if status == 'success':
                             filename, url, metadata = data
+                            active_tasks['validation'] += 1
                             validation_pool.add_task(process_validation, filename, url, metadata)
                         elif status == 'error':
                             failed_count += 1
@@ -1938,6 +1998,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 try:
                     while True:
                         result = validation_pool.results.get_nowait()
+                        active_tasks['validation'] -= 1
                         status, data = result
                         
                         if status == 'success':
@@ -1964,14 +2025,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                                 image_id = cursor.lastrowid
                                 
                                 # Process collections and albums
-                                # Process collections
                                 for gallery in metadata.get('collections', []):
-                                    if metadata.get('collections') and len(metadata.get('collections')) > 0:
-                                        logger.debug(f"Found {len(metadata['collections'])} collections for image: {metadata.get('title', 'Untitled')}")
-                                        for i, collection in enumerate(metadata.get('collections')):
-                                            if i == 0:  # Log only the first collection to avoid log spam
-                                                logger.debug(f"  - Collection: {collection['title']} (ID: {collection['id']})")
-                                
                                     cursor.execute("""
                                         INSERT OR IGNORE INTO collections (collection_id, title, url, is_public)
                                         VALUES (?, ?, ?, ?)
@@ -1987,12 +2041,6 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                                 
                                 # Process albums
                                 for gallery in metadata.get('albums', []):
-                                    if metadata.get('albums') and len(metadata.get('albums')) > 0:
-                                        logger.debug(f"Found {len(metadata['albums'])} albums for image: {metadata.get('title', 'Untitled')}")
-                                        for i, album in enumerate(metadata.get('albums')):
-                                            if i == 0:  # Log only the first album to avoid log spam
-                                                logger.debug(f"  - Album: {album['title']} (ID: {album['id']})")
-                                
                                     cursor.execute("""
                                         INSERT OR IGNORE INTO albums (album_id, title, url, is_public)
                                         VALUES (?, ?, ?, ?)
@@ -2008,12 +2056,6 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                                 
                                 # Process tags
                                 for tag in metadata.get('tags', []):
-                                    if metadata.get('tags') and len(metadata.get('tags')) > 0:
-                                        logger.debug(f"Found {len(metadata['tags'])} tags for image: {metadata.get('title', 'Untitled')}")
-                                        for i, tag_item in enumerate(metadata.get('tags')):
-                                            if i == 0:  # Log only the first tag to avoid log spam
-                                                logger.debug(f"  - Tag: {tag_item['name']} (Count: {tag_item['count']})")
-                                
                                     cursor.execute("""
                                         INSERT OR IGNORE INTO tags (name, count)
                                         VALUES (?, ?)
@@ -2060,19 +2102,22 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 
                 time.sleep(0.1)  # Small sleep to prevent busy waiting
         
+        # Wait for producer thread to finish
+        producer_thread.join(timeout=5)
+        
         # Shutdown thread pools
         metadata_pool.shutdown()
         download_pool.shutdown()
         validation_pool.shutdown()
         
         # Return success status and stats
-        success = (processed_count + failed_count) == len(image_ids_to_process) and failed_count == 0
+        success = (processed_count + failed_count) == len(image_data_list) and failed_count == 0
         stats = {
             'processed_count': processed_count,
             'failed_count': failed_count,
             'skipped_count': skipped_count,
             'banned_count': banned_count,
-            'total_images': len(image_ids_to_process),
+            'total_images': len(image_data_list),
             'author_counts': author_image_counts,
             'current_workers': current_workers,
             'consecutive_successes': consecutive_successes,
