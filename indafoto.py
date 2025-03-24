@@ -23,11 +23,23 @@ try:
     import atexit
     from io import BytesIO
     import psutil
+    import tracemalloc
 except ImportError as e:
     print(f"Error importing required modules: {e}")
     print("Please install the required modules using the requirements.txt file:\n")
     print("pip install -r requirements.txt")
     sys.exit(1)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('indafoto_crawler.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 def check_for_updates(filename=None):
     """Check if there's a newer version of the script available on GitHub.
@@ -108,17 +120,210 @@ def check_for_updates(filename=None):
     except Exception as e:
         logger.warning(f"Failed to check for updates for {base_filename}: {e}")
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('indafoto_crawler.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-
+def monitor_system_resources(interval=5, report_functions=False):
+    """Start a background thread that monitors system resources.
+    
+    Args:
+        interval: How often to log stats (in seconds)
+        report_functions: Whether to attempt to identify CPU-heavy functions
+    """
+    import psutil
+    import threading
+    import time
+    import tracemalloc
+    from datetime import datetime
+    import platform
+    
+    # Start memory tracking if reporting functions
+    if report_functions:
+        tracemalloc.start()
+    
+    # Get process object
+    process = psutil.Process()
+    stop_monitoring = {"value": False}
+    
+    def monitor_thread():
+        logger.info("Starting system resource monitoring")
+        logger.info(f"System: {platform.system()} {platform.version()}")
+        logger.info(f"CPU: {platform.processor()}")
+        logger.info(f"Cores: {psutil.cpu_count(logical=False)} physical, {psutil.cpu_count()} logical")
+        
+        # Track consecutive high CPU measurements
+        high_cpu_count = 0
+        cpu_threshold = 80.0  # Consider CPU high if above this percentage
+        
+        cpu_history = []
+        thread_history = []
+        memory_history = []
+        disk_io_history = []
+        
+        # Counter for full stats output
+        stat_counter = 0
+        full_stats_interval = 10  # Show full stats every X intervals
+        
+        while not stop_monitoring["value"]:
+            try:
+                stat_counter += 1
+                show_full_stats = (stat_counter % full_stats_interval == 0)
+                
+                # Get the timestamp
+                current_time = datetime.now().strftime("%H:%M:%S")
+                
+                # Memory usage
+                mem_info = process.memory_info()
+                memory_mb = mem_info.rss / (1024 * 1024)
+                
+                # CPU usage (percentage across all cores)
+                process_cpu_percent = process.cpu_percent(interval=0.5)
+                system_cpu_percent = psutil.cpu_percent(interval=0)
+                per_core_cpu = psutil.cpu_percent(interval=0, percpu=True)
+                
+                # Thread count and details
+                threads = process.threads()
+                thread_count = len(threads)
+                # Sort threads by CPU time
+                threads_sorted = sorted(threads, key=lambda t: t.user_time + t.system_time, reverse=True)
+                
+                # Disk I/O
+                try:
+                    io_counters = process.io_counters()
+                    io_read_mb = io_counters.read_bytes / (1024 * 1024)
+                    io_write_mb = io_counters.write_bytes / (1024 * 1024)
+                    
+                    # Calculate IO rates if we have history
+                    if disk_io_history:
+                        last_io = disk_io_history[-1]
+                        time_diff = time.time() - last_io[0]
+                        if time_diff > 0:
+                            io_read_rate = (io_read_mb - last_io[1]) / time_diff
+                            io_write_rate = (io_write_mb - last_io[2]) / time_diff
+                        else:
+                            io_read_rate = io_write_rate = 0
+                    else:
+                        io_read_rate = io_write_rate = 0
+                    
+                    disk_io_history.append((time.time(), io_read_mb, io_write_mb))
+                except:
+                    io_read_mb = io_write_mb = io_read_rate = io_write_rate = 0
+                
+                # Network I/O
+                try:
+                    net_io = psutil.net_io_counters()
+                    net_sent_mb = net_io.bytes_sent / (1024 * 1024)
+                    net_recv_mb = net_io.bytes_recv / (1024 * 1024)
+                except:
+                    net_sent_mb = net_recv_mb = 0
+                
+                # Record stats
+                timestamp = time.time()
+                cpu_history.append((timestamp, process_cpu_percent))
+                thread_history.append((timestamp, thread_count))
+                memory_history.append((timestamp, memory_mb))
+                
+                # Only keep recent history
+                max_history = 60  # Last 5 minutes at 5-second intervals
+                if len(cpu_history) > max_history:
+                    cpu_history.pop(0)
+                    thread_history.pop(0)
+                    memory_history.pop(0)
+                
+                if len(disk_io_history) > max_history:
+                    disk_io_history.pop(0)
+                
+                # Calculate averages
+                avg_cpu = sum(item[1] for item in cpu_history) / len(cpu_history)
+                avg_threads = sum(item[1] for item in thread_history) / len(thread_history)
+                avg_memory = sum(item[1] for item in memory_history) / len(memory_history)
+                
+                # Standard stats line for regular updates
+                logger.info(
+                    f"[{current_time}] CPU: {process_cpu_percent:.1f}% ({system_cpu_percent:.1f}% sys), "
+                    f"Threads: {thread_count}, Mem: {memory_mb:.1f}MB, "
+                    f"IO: {io_read_rate:.2f}MB/s read, {io_write_rate:.2f}MB/s write"
+                )
+                
+                # Full stats block (every X intervals)
+                if show_full_stats:
+                    # Create a nicely formatted block for detailed stats
+                    stats_block = [
+                        "┌─────────────────────────────────────────────────────────────────┐",
+                        f"│ SYSTEM STATISTICS REPORT                      {current_time}    │",
+                        "├─────────────────────────────────────────────────────────────────┤",
+                        f"│ CPU USAGE                                                       │",
+                        f"│   Process:       {process_cpu_percent:5.1f}% (avg: {avg_cpu:5.1f}%)                        │",
+                        f"│   System:        {system_cpu_percent:5.1f}%                                      │",
+                        "│   Per Core:      " + " ".join(f"{cpu:3.0f}%" for cpu in per_core_cpu[:8]) + "   │",
+                    ]
+                    
+                    if len(per_core_cpu) > 8:
+                        stats_block.append("│              " + " ".join(f"{cpu:3.0f}%" for cpu in per_core_cpu[8:16]) + "   │")
+                    
+                    stats_block.extend([
+                        "├─────────────────────────────────────────────────────────────────┤",
+                        f"│ MEMORY                                                          │",
+                        f"│   RSS:           {memory_mb:8.1f} MB                                   │",
+                        f"│   Virtual:       {mem_info.vms / (1024*1024):8.1f} MB                                   │",
+                        f"│   Percent:       {psutil.virtual_memory().percent:5.1f}%                                      │",
+                        "├─────────────────────────────────────────────────────────────────┤",
+                        f"│ THREADS (Total: {thread_count:3d}, avg: {avg_threads:5.1f})                              │"
+                    ])
+                    
+                    # Add top 5 threads by CPU usage
+                    for i, t in enumerate(threads_sorted[:5]):
+                        cpu_time = t.user_time + t.system_time
+                        # Handle platforms where thread status isn't available
+                        try:
+                            thread_status = t.status
+                        except AttributeError:
+                            thread_status = "unknown"
+                        stats_block.append(f"│   #{i+1}: ID {t.id:6d} - CPU time: {cpu_time:7.2f}s, Status: {thread_status:10s} │")
+                    
+                    stats_block.extend([
+                        "├─────────────────────────────────────────────────────────────────┤",
+                        f"│ DISK I/O                                                        │",
+                        f"│   Read:          {io_read_mb:8.1f} MB (Rate: {io_read_rate:6.2f} MB/s)             │",
+                        f"│   Write:         {io_write_mb:8.1f} MB (Rate: {io_write_rate:6.2f} MB/s)             │",
+                        "├─────────────────────────────────────────────────────────────────┤",
+                        f"│ NETWORK I/O                                                     │",
+                        f"│   Sent:          {net_sent_mb:8.1f} MB                                   │",
+                        f"│   Received:      {net_recv_mb:8.1f} MB                                   │",
+                        "└─────────────────────────────────────────────────────────────────┘"
+                    ])
+                    
+                    # Log the entire block
+                    for line in stats_block:
+                        logger.info(line)
+                
+                # Check for high CPU
+                if process_cpu_percent > cpu_threshold:
+                    high_cpu_count += 1
+                    if high_cpu_count >= 3 and report_functions:  # Three consecutive high readings
+                        # Take a memory snapshot to find possible hotspots
+                        snapshot = tracemalloc.take_snapshot()
+                        top_stats = snapshot.statistics('lineno')
+                        
+                        logger.warning(f"High CPU detected ({process_cpu_percent:.1f}%). Top memory consumers:")
+                        for i, stat in enumerate(top_stats[:5]):  # Show top 5
+                            logger.warning(f"  #{i+1}: {stat}")
+                        
+                        high_cpu_count = 0  # Reset counter
+                else:
+                    high_cpu_count = 0
+                
+                # Sleep for the interval
+                time.sleep(interval)
+                
+            except Exception as e:
+                logger.error(f"Error in resource monitor: {e}")
+                time.sleep(interval)  # Still sleep on error
+    
+    # Start monitor thread
+    monitor_t = threading.Thread(target=monitor_thread)
+    monitor_t.daemon = True
+    monitor_t.start()
+    
+    # Return function to stop monitoring
+    return lambda: setattr(stop_monitoring, "value", True)
 
 RESTART_INTERVAL = 3600*24 # 24 hours in seconds
 last_restart_time = time.time()
@@ -2380,7 +2585,462 @@ def get_high_res_url(url, session=None):
             session.mount('http://', original_adapters['http'])
             session.mount('https://', original_adapters['https'])
 
+def run_benchmark(iterations=100):
+    """Run performance benchmarks on critical components."""
+    import time
+    import platform
+    import psutil
+    
+    results = {
+        "system_info": {
+            "platform": platform.system(),
+            "platform_version": platform.version(),
+            "processor": platform.processor(),
+            "python_version": platform.python_version(),
+            "cpu_count": psutil.cpu_count(logical=False),
+            "logical_cpu_count": psutil.cpu_count(logical=True),
+            "memory_total": psutil.virtual_memory().total // (1024 * 1024)
+        },
+        "benchmarks": {}
+    }
+    
+    logger.info(f"Starting benchmark on {platform.system()} with {iterations} iterations")
+    
+    # CPU usage monitoring function
+    def monitor_cpu_usage(duration, interval=0.1):
+        """Monitor CPU usage over a period of time."""
+        start_time = time.time()
+        cpu_usage = []
+        process = psutil.Process()
+        
+        # Get initial CPU times for process
+        initial_proc_cpu_times = process.cpu_times()
+        initial_sys_cpu_times = psutil.cpu_times()
+        initial_real_time = time.time()
+        
+        while time.time() - start_time < duration:
+            # Get current CPU utilization percentage for this process
+            current_proc_percent = process.cpu_percent(interval=0)
+            system_percent = psutil.cpu_percent(interval=0)
+            
+            # Get detailed CPU time information
+            current_proc_cpu_times = process.cpu_times()
+            current_sys_cpu_times = psutil.cpu_times()
+            current_real_time = time.time()
+            
+            # Calculate deltas
+            real_time_delta = current_real_time - initial_real_time
+            
+            if real_time_delta > 0:
+                proc_user_delta = current_proc_cpu_times.user - initial_proc_cpu_times.user
+                proc_system_delta = current_proc_cpu_times.system - initial_proc_cpu_times.system
+                proc_total_delta = proc_user_delta + proc_system_delta
+                
+                # Calculate CPU utilization as percentage of real time
+                proc_utilization = (proc_total_delta / real_time_delta) * 100.0
+                
+                # On multi-core systems, this can exceed 100%
+                proc_utilization_per_core = proc_utilization / psutil.cpu_count()
+                
+                # Record data
+                cpu_usage.append({
+                    'timestamp': time.time() - start_time,
+                    'process_percent': current_proc_percent,
+                    'system_percent': system_percent,
+                    'process_utilization': proc_utilization,
+                    'process_utilization_per_core': proc_utilization_per_core,
+                    'num_threads': len(process.threads())
+                })
+            
+            time.sleep(interval)
+        
+        return {
+            'samples': cpu_usage,
+            'avg_process_percent': sum(sample['process_percent'] for sample in cpu_usage) / len(cpu_usage) if cpu_usage else 0,
+            'max_process_percent': max(sample['process_percent'] for sample in cpu_usage) if cpu_usage else 0,
+            'avg_system_percent': sum(sample['system_percent'] for sample in cpu_usage) / len(cpu_usage) if cpu_usage else 0,
+            'max_system_percent': max(sample['system_percent'] for sample in cpu_usage) if cpu_usage else 0,
+            'avg_process_utilization': sum(sample['process_utilization'] for sample in cpu_usage) / len(cpu_usage) if cpu_usage else 0,
+            'max_process_utilization': max(sample['process_utilization'] for sample in cpu_usage) if cpu_usage else 0,
+            'avg_threads': sum(sample['num_threads'] for sample in cpu_usage) / len(cpu_usage) if cpu_usage else 0,
+            'max_threads': max(sample['num_threads'] for sample in cpu_usage) if cpu_usage else 0
+        }
+    
+    # Benchmark SQLite operations
+    logger.info("Benchmarking SQLite operations...")
+    start_time = time.time()
+    conn = sqlite3.connect(":memory:")
+    cursor = conn.cursor()
+    
+    # Create test tables
+    cursor.execute("""
+        CREATE TABLE test_images (
+            id INTEGER PRIMARY KEY,
+            image_id TEXT UNIQUE,
+            title TEXT,
+            url TEXT,
+            author TEXT,
+            date TEXT,
+            page_url TEXT
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE test_tags (
+            id INTEGER PRIMARY KEY,
+            name TEXT UNIQUE,
+            count INTEGER
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE test_image_tags (
+            id INTEGER PRIMARY KEY,
+            image_id INTEGER,
+            tag_id INTEGER
+        )
+    """)
+    
+    # Benchmark single inserts vs batch inserts
+    single_insert_start = time.time()
+    for i in range(iterations):
+        cursor.execute("""
+            INSERT INTO test_images (image_id, title, url, author, date, page_url)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (f"img_{i}", f"Title {i}", f"http://example.com/img_{i}.jpg", 
+              f"author_{i % 10}", f"2023-01-{i % 30 + 1}", f"http://example.com/page_{i}"))
+        
+        # Insert tags
+        for j in range(5):
+            cursor.execute("""
+                INSERT OR IGNORE INTO test_tags (name, count)
+                VALUES (?, ?)
+            """, (f"tag_{j}_{i % 20}", i * j))
+            
+            cursor.execute("SELECT id FROM test_tags WHERE name = ?", (f"tag_{j}_{i % 20}",))
+            tag_id = cursor.fetchone()[0]
+            
+            cursor.execute("""
+                INSERT INTO test_image_tags (image_id, tag_id)
+                VALUES (?, ?)
+            """, (i, tag_id))
+            
+        if i % 10 == 0:
+            conn.commit()
+    
+    conn.commit()
+    single_insert_time = time.time() - single_insert_start
+    
+    # Benchmark batch operations
+    cursor.execute("DELETE FROM test_images")
+    cursor.execute("DELETE FROM test_tags")
+    cursor.execute("DELETE FROM test_image_tags")
+    conn.commit()
+    
+    batch_insert_start = time.time()
+    image_data = [(f"img_{i}", f"Title {i}", f"http://example.com/img_{i}.jpg", 
+                   f"author_{i % 10}", f"2023-01-{i % 30 + 1}", f"http://example.com/page_{i}")
+                  for i in range(iterations)]
+    
+    cursor.executemany("""
+        INSERT INTO test_images (image_id, title, url, author, date, page_url)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, image_data)
+    
+    tags_data = [(f"tag_{j}_{i % 20}", i * j) 
+                for i in range(iterations) 
+                for j in range(5)]
+    
+    cursor.executemany("""
+        INSERT OR IGNORE INTO test_tags (name, count)
+        VALUES (?, ?)
+    """, tags_data)
+    
+    # Need to get tag IDs for the many-to-many relationships
+    image_tags_data = []
+    for i in range(iterations):
+        for j in range(5):
+            cursor.execute("SELECT id FROM test_tags WHERE name = ?", (f"tag_{j}_{i % 20}",))
+            tag_id = cursor.fetchone()[0]
+            image_tags_data.append((i, tag_id))
+    
+    cursor.executemany("""
+        INSERT INTO test_image_tags (image_id, tag_id)
+        VALUES (?, ?)
+    """, image_tags_data)
+    
+    conn.commit()
+    batch_insert_time = time.time() - batch_insert_start
+    conn.close()
+    
+    results["benchmarks"]["sqlite"] = {
+        "single_inserts_ms": single_insert_time * 1000,
+        "batch_inserts_ms": batch_insert_time * 1000,
+        "single_to_batch_ratio": single_insert_time / batch_insert_time
+    }
+    
+    # Benchmark threading with SQLite - this is likely where Windows vs Mac differences occur
+    logger.info("Benchmarking SQLite under threading load...")
+    
+    # Start CPU monitoring in a separate thread
+    cpu_monitor_thread = threading.Thread(target=lambda: None)  # Placeholder
+    cpu_monitor_results = {}
+    
+    # Create a shared database file
+    db_path = "benchmark_threading.db"
+    if os.path.exists(db_path):
+        os.remove(db_path)
+    
+    # Create schema
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE test_data (
+            id INTEGER PRIMARY KEY,
+            thread_id INTEGER,
+            iteration INTEGER,
+            timestamp REAL,
+            value TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+    
+    # Track time spent waiting for locks
+    lock_wait_times = []
+    thread_results = []
+    
+    # Use a threading event to coordinate all threads starting at once
+    start_event = threading.Event()
+    complete_count = {"value": 0}
+    lock = threading.Lock()
 
+    # Worker function that performs database operations
+    def db_worker(thread_id, iterations):
+        # Wait for start signal
+        start_event.wait()
+        
+        thread_start_time = time.time()
+        local_lock_waits = []
+        
+        try:
+            # Each thread gets its own connection - this is key
+            local_conn = sqlite3.connect(db_path, timeout=30.0)  # 30 second timeout
+            local_cursor = local_conn.cursor()
+            
+            for i in range(iterations):
+                # Time how long the transaction takes (may include lock waiting)
+                txn_start = time.time()
+                
+                try:
+                    # Start transaction
+                    local_cursor.execute("BEGIN IMMEDIATE")
+                    
+                    # Got lock, record actual work time without lock wait
+                    work_start = time.time()
+                    lock_wait = work_start - txn_start
+                    local_lock_waits.append(lock_wait)
+                    
+                    # Do some work
+                    local_cursor.execute("""
+                        INSERT INTO test_data (thread_id, iteration, timestamp, value)
+                        VALUES (?, ?, ?, ?)
+                    """, (thread_id, i, time.time(), f"Data from thread {thread_id}, iteration {i}"))
+                    
+                    # Add a small select query too
+                    local_cursor.execute("""
+                        SELECT COUNT(*) FROM test_data WHERE thread_id = ?
+                    """, (thread_id,))
+                    
+                    # Simulate some processing time
+                    _ = sum(range(10000))
+                    
+                    # Commit transaction
+                    local_conn.commit()
+                    
+                except sqlite3.OperationalError as e:
+                    # If we get a timeout or busy error, log it
+                    logger.warning(f"Thread {thread_id} got SQLite error: {e}")
+                    local_conn.rollback()
+                
+                # Small sleep to yield to other threads
+                time.sleep(0.001)
+            
+            local_conn.close()
+            
+        except Exception as e:
+            logger.error(f"Thread {thread_id} failed: {e}")
+        
+        thread_time = time.time() - thread_start_time
+        
+        # Report results
+        with lock:
+            thread_results.append({
+                "thread_id": thread_id,
+                "time_ms": thread_time * 1000,
+                "iterations": iterations,
+                "avg_lock_wait_ms": sum(local_lock_waits) * 1000 / len(local_lock_waits) if local_lock_waits else 0,
+                "max_lock_wait_ms": max(local_lock_waits) * 1000 if local_lock_waits else 0
+            })
+            complete_count["value"] += 1
+    
+    # Create and start threads
+    thread_count = min(8, psutil.cpu_count(logical=True))
+    iterations_per_thread = max(10, iterations // 5)  # Reduce for threading test
+    logger.info(f"Starting {thread_count} threads with {iterations_per_thread} iterations each")
+    
+    # Start CPU monitoring in a separate thread
+    monitor_complete = {"value": False}
+    cpu_results_container = {"results": None}
+    
+    def cpu_monitor_func():
+        cpu_results_container["results"] = monitor_cpu_usage(60)  # Monitor for up to 60 seconds
+        
+    cpu_monitor_thread = threading.Thread(target=cpu_monitor_func)
+    cpu_monitor_thread.daemon = True
+    cpu_monitor_thread.start()
+    
+    threads = []
+    for i in range(thread_count):
+        t = threading.Thread(target=db_worker, args=(i, iterations_per_thread))
+        threads.append(t)
+        t.start()
+    
+    # Let all threads start at the same time for maximum contention
+    start_event.set()
+    
+    # Wait for threads to complete
+    thread_benchmark_start = time.time()
+    while complete_count["value"] < thread_count:
+        time.sleep(0.1)
+        if time.time() - thread_benchmark_start > 300:  # 5 minute timeout
+            logger.error("Threading benchmark timed out")
+            break
+    
+    thread_benchmark_time = time.time() - thread_benchmark_start
+    
+    # Give the CPU monitor a moment to record final stats
+    time.sleep(1)
+    monitor_complete["value"] = True
+    cpu_monitor_thread.join(2)  # Wait for CPU monitoring to finish, timeout after 2 seconds
+    
+    # Get CPU monitoring results
+    cpu_monitoring = cpu_results_container["results"]
+    if cpu_monitoring:
+        results["benchmarks"]["cpu_usage"] = {
+            "avg_process_percent": cpu_monitoring["avg_process_percent"],
+            "max_process_percent": cpu_monitoring["max_process_percent"],
+            "avg_system_percent": cpu_monitoring["avg_system_percent"],
+            "max_system_percent": cpu_monitoring["max_system_percent"],
+            "avg_process_utilization": cpu_monitoring["avg_process_utilization"],
+            "max_process_utilization": cpu_monitoring["max_process_utilization"],
+            "avg_threads": cpu_monitoring["avg_threads"],
+            "max_threads": cpu_monitoring["max_threads"]
+        }
+    
+    # Calculate threading metrics
+    avg_lock_wait = sum(t["avg_lock_wait_ms"] for t in thread_results) / len(thread_results)
+    max_lock_wait = max(t["max_lock_wait_ms"] for t in thread_results)
+    total_operations = thread_count * iterations_per_thread
+    operations_per_sec = total_operations / thread_benchmark_time
+    
+    results["benchmarks"]["sqlite_threading"] = {
+        "total_time_ms": thread_benchmark_time * 1000,
+        "thread_count": thread_count,
+        "operations_per_thread": iterations_per_thread,
+        "total_operations": total_operations,
+        "operations_per_second": operations_per_sec,
+        "avg_lock_wait_ms": avg_lock_wait,
+        "max_lock_wait_ms": max_lock_wait,
+        "thread_details": thread_results
+    }
+    
+    # Clean up benchmark database
+    if os.path.exists(db_path):
+        try:
+            os.remove(db_path)
+        except:
+            pass
+    
+    # Benchmark hash calculation
+    logger.info("Benchmarking hash calculations...")
+    hash_start = time.time()
+    test_data = os.urandom(1024 * 1024)  # 1MB random data
+    for i in range(iterations):
+        sha256_hash = hashlib.sha256()
+        sha256_hash.update(test_data)
+        hash_result = sha256_hash.hexdigest()
+    hash_time = time.time() - hash_start
+    
+    results["benchmarks"]["hash_calculation"] = {
+        "time_ms": hash_time * 1000,
+        "iterations": iterations,
+        "data_size": "1MB"
+    }
+    
+    # Benchmark threading
+    logger.info("Benchmarking thread pool...")
+    thread_start = time.time()
+    
+    def thread_task(num):
+        # Simulate some work
+        time.sleep(0.01)
+        result = 0
+        for i in range(10000):
+            result += i
+        return result
+    
+    pool = ThreadPool(8, "benchmark")
+    for i in range(iterations * 2):
+        pool.add_task(thread_task, i)
+    pool.wait_completion()
+    thread_time = time.time() - thread_start
+    
+    results["benchmarks"]["threading"] = {
+        "time_ms": thread_time * 1000,
+        "iterations": iterations * 2,
+        "thread_count": 8
+    }
+    
+    # Overall results
+    total_time = time.time() - start_time
+    results["total_time_ms"] = total_time * 1000
+    
+    # Print results
+    logger.info("Benchmark Results:")
+    logger.info(f"System: {results['system_info']['platform']} {results['system_info']['platform_version']}")
+    logger.info(f"Processor: {results['system_info']['processor']}")
+    logger.info(f"CPU cores: {results['system_info']['cpu_count']} physical, {results['system_info']['logical_cpu_count']} logical")
+    logger.info(f"Memory: {results['system_info']['memory_total']} MB")
+    logger.info(f"Total time: {results['total_time_ms']:.2f}ms")
+    logger.info("SQLite:")
+    logger.info(f"  - Single inserts: {results['benchmarks']['sqlite']['single_inserts_ms']:.2f}ms")
+    logger.info(f"  - Batch inserts: {results['benchmarks']['sqlite']['batch_inserts_ms']:.2f}ms")
+    logger.info(f"  - Ratio (single/batch): {results['benchmarks']['sqlite']['single_to_batch_ratio']:.2f}x")
+    logger.info("SQLite Threading:")
+    logger.info(f"  - Total operations: {results['benchmarks']['sqlite_threading']['total_operations']}")
+    logger.info(f"  - Operations/sec: {results['benchmarks']['sqlite_threading']['operations_per_second']:.2f}")
+    logger.info(f"  - Avg lock wait: {results['benchmarks']['sqlite_threading']['avg_lock_wait_ms']:.2f}ms")
+    logger.info(f"  - Max lock wait: {results['benchmarks']['sqlite_threading']['max_lock_wait_ms']:.2f}ms")
+    
+    if "cpu_usage" in results["benchmarks"]:
+        logger.info("CPU Usage:")
+        logger.info(f"  - Avg process CPU: {results['benchmarks']['cpu_usage']['avg_process_percent']:.2f}%")
+        logger.info(f"  - Max process CPU: {results['benchmarks']['cpu_usage']['max_process_percent']:.2f}%")
+        logger.info(f"  - Avg system CPU: {results['benchmarks']['cpu_usage']['avg_system_percent']:.2f}%")
+        logger.info(f"  - Max system CPU: {results['benchmarks']['cpu_usage']['max_system_percent']:.2f}%")
+        logger.info(f"  - Process utilization: {results['benchmarks']['cpu_usage']['avg_process_utilization']:.2f}%")
+        logger.info(f"  - Avg thread count: {results['benchmarks']['cpu_usage']['avg_threads']:.2f}")
+    
+    logger.info(f"Hash calculation: {results['benchmarks']['hash_calculation']['time_ms']:.2f}ms")
+    logger.info(f"Thread pool: {results['benchmarks']['threading']['time_ms']:.2f}ms")
+    
+    # Save results to file
+    with open(f"benchmark_{platform.system().lower()}.json", "w") as f:
+        json.dump(results, f, indent=2)
+    
+    logger.info(f"Results saved to benchmark_{platform.system().lower()}.json")
+    return results
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Indafoto Crawler')
@@ -2412,6 +3072,18 @@ if __name__ == "__main__":
                        help='Enable automatic restart every 24 hours (default: disabled)')
     parser.add_argument('--no-error-restart', action='store_true',
                        help='Disable automatic restart even in case of errors (default: enabled)')
+    parser.add_argument('--benchmark', action='store_true',
+                       help='Run performance benchmark tests')
+    parser.add_argument('--benchmark-iterations', type=int, default=100,
+                       help='Number of iterations for benchmark tests')
+    parser.add_argument('--sqlite-test', choices=['connection-per-thread', 'shared-connection', 'connection-pool'],
+                      help='Test specific SQLite connection patterns')
+    parser.add_argument('--monitor', action='store_true',
+                      help='Enable real-time CPU, memory and thread monitoring')
+    parser.add_argument('--monitor-interval', type=int, default=5,
+                      help='How often to log monitoring stats (in seconds)')
+    parser.add_argument('--monitor-functions', action='store_true',
+                      help='Try to identify CPU-intensive functions during monitoring')
     args = parser.parse_args()
     
     try:
@@ -2424,9 +3096,249 @@ if __name__ == "__main__":
         MAX_WORKERS = args.workers
         logger.info(f"Starting crawler with {current_workers} workers")
         
+        # Start resource monitoring if requested
+        stop_monitoring = None
+        if args.monitor:
+            stop_monitoring = monitor_system_resources(
+                interval=args.monitor_interval,
+                report_functions=args.monitor_functions
+            )
+        
         conn = init_db()
         
-        if args.ban_author:
+        if args.benchmark:
+            run_benchmark(iterations=args.benchmark_iterations)
+        elif args.sqlite_test:
+            # Special SQLite threading tests
+            def test_sqlite_threading_patterns(mode, thread_count=8, iterations=50):
+                """Test different SQLite connection patterns under threading load."""
+                import time
+                import threading
+                import sqlite3
+                import psutil
+                import queue
+                
+                logger.info(f"Testing SQLite {mode} mode with {thread_count} threads")
+                
+                # Create test database
+                db_path = f"sqlite_test_{mode}.db"
+                if os.path.exists(db_path):
+                    os.remove(db_path)
+                
+                # Setup database
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    CREATE TABLE test_data (
+                        id INTEGER PRIMARY KEY,
+                        thread_id INTEGER,
+                        iteration INTEGER,
+                        timestamp REAL,
+                        data TEXT
+                    )
+                """)
+                conn.commit()
+                
+                # For connection pool
+                connection_pool = queue.Queue()
+                if mode == 'connection-pool':
+                    # Pre-create connections
+                    pool_size = min(thread_count * 2, 32)  # 2 connections per thread, max 32
+                    for i in range(pool_size):
+                        pool_conn = sqlite3.connect(db_path, timeout=30.0)
+                        # Enable WAL mode for better concurrency
+                        pool_conn.execute("PRAGMA journal_mode=WAL")
+                        connection_pool.put(pool_conn)
+                
+                # For shared connection mode
+                shared_conn = None
+                shared_conn_lock = threading.Lock()
+                
+                if mode == 'shared-connection':
+                    shared_conn = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
+                    # Enable WAL mode for better concurrency
+                    shared_conn.execute("PRAGMA journal_mode=WAL")
+                
+                # Track time spent waiting for locks
+                workers_complete = {"count": 0}
+                cpu_process = psutil.Process()
+                
+                # Get initial CPU times
+                initial_process_time = sum(cpu_process.cpu_times()[:2])  # User + System time
+                initial_cpu_percent = cpu_process.cpu_percent()
+                
+                start_time = time.time()
+                
+                # Create a monitor thread to track CPU usage
+                cpu_samples = []
+                
+                def cpu_monitor():
+                    while workers_complete["count"] < thread_count:
+                        cpu_samples.append({
+                            "timestamp": time.time() - start_time,
+                            "cpu_percent": cpu_process.cpu_percent(interval=0.1),
+                            "num_threads": len(cpu_process.threads())
+                        })
+                        time.sleep(0.2)
+                
+                monitor_thread = threading.Thread(target=cpu_monitor)
+                monitor_thread.daemon = True
+                monitor_thread.start()
+                
+                # Sync point for all threads to start at once
+                ready_event = threading.Event()
+                
+                def worker(thread_id):
+                    # Wait until all threads are ready
+                    ready_event.wait()
+                    
+                    # Use appropriate connection based on mode
+                    local_conn = None
+                    
+                    if mode == 'connection-per-thread':
+                        local_conn = sqlite3.connect(db_path, timeout=30.0)
+                        # Enable WAL mode for better concurrency
+                        local_conn.execute("PRAGMA journal_mode=WAL")
+                    
+                    elif mode == 'connection-pool':
+                        local_conn = connection_pool.get()
+                    
+                    success_count = 0
+                    error_count = 0
+                    lock_waits = []
+                    
+                    try:
+                        for i in range(iterations):
+                            start_op = time.time()
+                            
+                            try:
+                                if mode == 'shared-connection':
+                                    # Use the shared connection with a lock
+                                    with shared_conn_lock:
+                                        shared_conn.execute("""
+                                            INSERT INTO test_data (thread_id, iteration, timestamp, data)
+                                            VALUES (?, ?, ?, ?)
+                                        """, (thread_id, i, time.time(), f"Data from thread {thread_id}, iteration {i}"))
+                                        
+                                        # Read some data
+                                        shared_conn.execute("""
+                                            SELECT COUNT(*) FROM test_data WHERE thread_id = ?
+                                        """, (thread_id,))
+                                        
+                                        # Commit within the lock
+                                        shared_conn.commit()
+                                
+                                else:  # connection-per-thread or connection-pool
+                                    # Each thread has its own connection or from pool
+                                    local_conn.execute("""
+                                        INSERT INTO test_data (thread_id, iteration, timestamp, data)
+                                        VALUES (?, ?, ?, ?)
+                                    """, (thread_id, i, time.time(), f"Data from thread {thread_id}, iteration {i}"))
+                                    
+                                    # Read some data
+                                    local_conn.execute("""
+                                        SELECT COUNT(*) FROM test_data WHERE thread_id = ?
+                                    """, (thread_id,))
+                                    
+                                    # Commit the transaction
+                                    local_conn.commit()
+                                
+                                success_count += 1
+                                
+                            except sqlite3.OperationalError as e:
+                                error_count += 1
+                                if mode != 'shared-connection':  # No need to rollback with shared lock
+                                    try:
+                                        local_conn.rollback()
+                                    except:
+                                        pass
+                            
+                            end_op = time.time()
+                            lock_waits.append((end_op - start_op) * 1000)  # ms
+                            
+                            # Small pause to reduce CPU contention
+                            time.sleep(0.001)
+                    
+                    finally:
+                        # Return connection to pool if using pool
+                        if mode == 'connection-pool':
+                            connection_pool.put(local_conn)
+                        
+                        # Close per-thread connection if using that mode
+                        elif mode == 'connection-per-thread' and local_conn:
+                            local_conn.close()
+                    
+                    # Report completion
+                    with threading.Lock():
+                        workers_complete["count"] += 1
+                        logger.debug(f"Thread {thread_id} completed: {success_count} success, {error_count} errors")
+                
+                # Start worker threads
+                threads = []
+                for i in range(thread_count):
+                    t = threading.Thread(target=worker, args=(i,))
+                    threads.append(t)
+                    t.start()
+                
+                # All threads can start now
+                ready_event.set()
+                
+                # Wait for all workers to complete
+                while workers_complete["count"] < thread_count:
+                    time.sleep(0.1)
+                
+                elapsed = time.time() - start_time
+                
+                # Calculate CPU usage
+                final_process_time = sum(cpu_process.cpu_times()[:2])
+                cpu_time_used = final_process_time - initial_process_time
+                
+                # Calculate average CPU percentage
+                avg_cpu = sum(sample["cpu_percent"] for sample in cpu_samples) / len(cpu_samples) if cpu_samples else 0
+                max_cpu = max(sample["cpu_percent"] for sample in cpu_samples) if cpu_samples else 0
+                
+                # Clean up
+                if mode == 'shared-connection' and shared_conn:
+                    shared_conn.close()
+                
+                if mode == 'connection-pool':
+                    while not connection_pool.empty():
+                        conn = connection_pool.get_nowait()
+                        conn.close()
+                
+                # Get database size
+                db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
+                
+                # Report results
+                logger.info(f"SQLite {mode} Results:")
+                logger.info(f"  - Total time: {elapsed:.2f} seconds")
+                logger.info(f"  - Operations: {thread_count * iterations}")
+                logger.info(f"  - Operations/sec: {(thread_count * iterations) / elapsed:.2f}")
+                logger.info(f"  - Average CPU: {avg_cpu:.2f}%")
+                logger.info(f"  - Maximum CPU: {max_cpu:.2f}%")
+                logger.info(f"  - CPU time used: {cpu_time_used:.2f} seconds")
+                logger.info(f"  - CPU efficiency: {(cpu_time_used / elapsed) * 100:.2f}%")
+                logger.info(f"  - Final DB size: {db_size / 1024:.2f} KB")
+                
+                # Clean up test database
+                if os.path.exists(db_path):
+                    try:
+                        conn.close()
+                        os.remove(db_path)
+                    except:
+                        pass
+                
+                # Also try to clean up any WAL files
+                for ext in ['-wal', '-shm']:
+                    wal_file = db_path + ext
+                    if os.path.exists(wal_file):
+                        try:
+                            os.remove(wal_file)
+                        except:
+                            pass
+            
+            test_sqlite_threading_patterns(args.sqlite_test)
+        elif args.ban_author:
             if not args.ban_reason:
                 print("Error: --ban-reason is required when banning an author")
                 sys.exit(1)
@@ -2458,5 +3370,7 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"Unexpected error occurred: {e}", exc_info=True)
     finally:
+        if stop_monitoring:
+            stop_monitoring()
         if 'conn' in locals():
             conn.close()
