@@ -613,7 +613,7 @@ def create_session(max_retries=3, pool_connections=4):
             connections=pool_connections,
             maxsize=pool_connections,
             block=True,
-            ssl_version=ssl.PROTOCOL_TLSv1_2,
+            ssl_version=ssl.PROTOCOL_TLS,
             # Enable session reuse
             ssl_context=ssl.create_default_context(
                 purpose=ssl.Purpose.SERVER_AUTH,
@@ -636,11 +636,11 @@ def init_db():
         available_memory = psutil.virtual_memory().available
         total_memory = psutil.virtual_memory().total
         
-        # Calculate cache size (in KB) - use up to 35% of available memory, max 500MB
-        cache_kb = min(int(available_memory * 0.35 / 1024), 500 * 1024 * 1024)
+        # Calculate cache size (in KB) - use up to 15% of available memory, max 200MB
+        cache_kb = min(int(available_memory * 0.15 / 1024), 200 * 1024)
         
-        # Calculate mmap size (in bytes) - use up to 35% of available memory, max 500MB
-        mmap_bytes = min(int(available_memory * 0.35), 500 * 1024 * 1024)
+        # Calculate mmap size (in bytes) - use up to 10% of available memory, max 500MB
+        mmap_bytes = min(int(available_memory * 0.10), 500 * 1024 * 1024)
         
         logger.info(f"System memory: {total_memory/1024/1024/1024:.2f}GB total, {available_memory/1024/1024/1024:.2f}GB available")
         logger.info(f"SQLite memory allocation: {cache_kb/1024:.2f}MB cache, {mmap_bytes/1024/1024:.2f}MB mmap")
