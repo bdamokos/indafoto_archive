@@ -975,6 +975,13 @@ def get_image_links(search_page_url, attempt=1, session=None):
         tumblr_links = soup.find_all('a', href=lambda x: x and 'tumblr.com/share/photo' in x)
         logger.info(f"Found {len(tumblr_links)} Tumblr share links")
         
+        # Extract current page number from URL
+        current_page = 0
+        page_match = re.search(r'page_offset=(\d+)', search_page_url)
+        if page_match:
+            current_page = int(page_match.group(1))
+        next_page = current_page + 1
+        
         for link in tumblr_links:
             href = link.get('href', '')
             # Extract both the source (image URL) and clickthru (photo page URL) parameters
@@ -992,18 +999,24 @@ def get_image_links(search_page_url, attempt=1, session=None):
                     caption_param = href.split('caption=')[1].split('&')[0] if 'caption=' in href else ''
                     caption = unquote(unquote(caption_param))
                     
+                    # Extract page number from photo page URL
+                    page_match = re.search(r'page_offset=(\d+)', photo_page_url)
+                    page_number = int(page_match.group(1)) if page_match else current_page
+                    
                     if image_url.startswith('https://'):
                         image_data.append({
                             'image_url': image_url,
                             'page_url': photo_page_url,
-                            'caption': caption
+                            'caption': caption,
+                            'next_page': page_number == next_page  # True only if this image is from the next sequential page
                         })
-                        logger.debug(f"Found image: {image_url} from page: {photo_page_url}")
+                        logger.debug(f"Found image: {image_url} from page {page_number} (next_page={page_number == next_page})")
                 except Exception as e:
                     logger.error(f"Failed to parse Tumblr share URL: {e}")
                     continue
 
-        logger.info(f"Found {len(image_data)} images with metadata on page {search_page_url}")
+        next_page_count = sum(1 for img in image_data if img.get('next_page', False))
+        logger.info(f"Found {len(image_data)} images with metadata on page {search_page_url} ({next_page_count} from next page {next_page})")
         return image_data
     except requests.exceptions.HTTPError as e:
         if any(str(code) in str(e) for code in [408, 429, 500, 502, 503, 504, 507, 508, 509]):
@@ -1878,13 +1891,13 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
     def metadata_producer():
         """Producer function that feeds the metadata pool with new images."""
         try:
+            next_page_started = False
             for image_data in image_data_list:
                 try:
                     url = image_data.get('image_url', '')
                     page_url = image_data.get('page_url', '')
                     
                     if not url or not page_url:
-                        # Use put with timeout to prevent blocking forever
                         try:
                             db_check_queue.put(('error', image_data, "Skipping image with no URL or page URL"), timeout=30)
                         except queue.Full:
@@ -1901,6 +1914,12 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                             logger.warning("DB check queue full, waiting for space...")
                             db_check_queue.put(('error', image_data, f"Could not extract image ID from URL: {url}"), block=True)
                         continue
+                    
+                    # Check if this is from the next page
+                    is_next_page = 'next_page' in page_url
+                    if is_next_page and not next_page_started:
+                        next_page_started = True
+                        logger.debug("Starting to process next page metadata")
                     
                     # Queue the image for database check in main thread with backpressure
                     try:
@@ -1944,17 +1963,18 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
             
             # Process results and chain tasks
             while not completion_status['all_tasks_done']:
-                # Check if all tasks are complete
-                if (completion_status['producer_done'] and
-                    active_tasks['metadata'] == 0 and 
-                    active_tasks['download'] == 0 and 
-                    active_tasks['validation'] == 0 and 
-                    db_check_queue.empty() and 
-                    next_batch_queue.empty()):
-                    completion_status['all_tasks_done'] = True
-                    break
+                # Check if all tasks are complete with more granular conditions
+                if completion_status['producer_done']:
+                    # If producer is done and no active tasks, we can proceed
+                    if (active_tasks['metadata'] == 0 and 
+                        active_tasks['download'] == 0 and 
+                        active_tasks['validation'] == 0):
+                        # Only wait for db_check_queue if we have no active tasks
+                        if db_check_queue.empty():
+                            completion_status['all_tasks_done'] = True
+                            break
                 
-                # Check database for next image
+                # Check database for next image with timeout
                 try:
                     action, image_data, image_id = db_check_queue.get(timeout=1)
                     if action == 'done':
@@ -1983,7 +2003,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                         pbar.update(1)
                         continue
                     
-                    # Add to next batch queue for processing with backpressure
+                    # Add to next batch queue with backpressure
                     try:
                         next_batch_queue.put(image_data, timeout=30)
                     except queue.Full:
@@ -1993,7 +2013,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                 except queue.Empty:
                     pass
                 
-                # Process next batch with controlled rate
+                # Process next batch with controlled rate and better progress tracking
                 try:
                     while not next_batch_queue.empty():
                         # Check if metadata pool is getting too full
@@ -2005,10 +2025,13 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                         if random.random() <= sample_rate:
                             active_tasks['metadata'] += 1
                             metadata_pool.add_task(process_metadata, image_data)
-                            # Update metadata progress bar
+                            # Update metadata progress bar based on URL
                             if 'next_page' in image_data.get('page_url', ''):
                                 metadata_progress['next_page'] += 1
                                 next_page_pbar.update(1)
+                                # Log progress for next page metadata
+                                if metadata_progress['next_page'] % 10 == 0:
+                                    logger.info(f"Next page metadata progress: {metadata_progress['next_page']}/36")
                             else:
                                 metadata_progress['current_page'] += 1
                                 metadata_pbar.update(1)
