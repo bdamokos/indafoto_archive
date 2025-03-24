@@ -578,17 +578,14 @@ os.makedirs(BASE_DIR, exist_ok=True)
 banned_authors_set = set()
 current_page = 0  # Track current page number
 
-def create_session(max_retries=3, pool_connections=10):
-    """Create a standardized session with HTTP/2 and multiplexing enabled"""
+def create_session(max_retries=3, pool_connections=4):
+    """Create a standardized session optimized for HTTP/1.1"""
     session = requests.Session()
     session.headers.update(HEADERS)
     session.cookies.update(COOKIES)
     
-    # Enable HTTP/2 with multiplexing
-    session.http2 = True
-    session.multiplexed = True
-    
-    # Configure adapter for better performance
+    # Configure adapter for better performance with HTTP/1.1
+    # For HTTP/1.1, we need more connections since each one can only handle one request at a time
     adapter = requests.adapters.HTTPAdapter(
         pool_maxsize=pool_connections,
         pool_block=True,
@@ -1752,7 +1749,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
     # Create session pool with more sessions for better parallelization
     session_pool = queue.Queue(maxsize=current_workers * 4)
     for _ in range(current_workers * 4):
-        session = create_session(max_retries=3, pool_connections=current_workers * 2)
+        session = create_session(max_retries=3)
         session_pool.put(session)
     
     def process_metadata(image_data):
