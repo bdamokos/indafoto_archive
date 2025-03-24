@@ -1433,6 +1433,8 @@ def calculate_file_hash(filepath):
         logger.error(f"Failed to calculate hash for {filepath}: {e}")
         return None
 
+counter = 4
+
 def download_image(image_url, author, session=None):
     """Download an image and save locally. Returns (filename, hash) tuple or (None, None) if failed."""
     try:
@@ -1485,12 +1487,19 @@ def download_image(image_url, author, session=None):
                 sha256_hash = hashlib.sha256()
                 downloaded_size = 0
                 
+                # Generate a random number between 5 and 17
+                global counter
+                random_number = counter % 8 + 5
+                counter += 1
+                # Generate a subsequent green coluor in HEX using the counter, e.g. 00FF00, 00FE00, 00FD00, etc.
+                green_hex = f"#00{hex(255 - counter % 256)[2:].zfill(2)}00"
                 with tqdm(
                     total=total_size,
                     unit='B',
                     unit_scale=True,
                     desc=f"Downloading {os.path.basename(filename)}",
-                    colour='green'
+                    colour=green_hex,
+                    position=random_number
                 ) as pbar:
                     for chunk in response.iter_content(chunk_size=BLOCK_SIZE):
                         if not chunk:  # Filter out keep-alive chunks
@@ -1930,8 +1939,8 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
         
         # Create progress bars
         with tqdm(total=len(image_data_list), desc="Processing images", colour='yellow', position=0) as pbar, \
-             tqdm(total=0, desc="Metadata extraction", colour='purple', position=1) as metadata_pbar, \
-             tqdm(total=0, desc="Next page metadata", colour='orange', position=2) as next_page_pbar:
+             tqdm(total=36, desc="Metadata extraction", colour='#800080', position=1) as metadata_pbar, \
+             tqdm(total=36, desc="Next page metadata", colour='#FFA500', position=2) as next_page_pbar:
             
             # Process results and chain tasks
             while not completion_status['all_tasks_done']:
@@ -2306,7 +2315,7 @@ def crawl_images(start_offset=0, retry_mode=False):
                     conn.commit()
                     logger.info(f"Added page {page_number} to retry queue due to 0 images")
         
-        for page in tqdm(range(start_offset, TOTAL_PAGES), desc="Crawling pages", colour='blue'):
+        for page in tqdm(range(start_offset, TOTAL_PAGES), desc="Crawling pages", colour='blue', position=5):
             # Check if we should restart
             if should_restart:
                 logger.info("Restart flag set, initiating restart...")
