@@ -86,13 +86,15 @@
 <style>
 .tag-cloud {
     max-width: 300px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    white-space: normal;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
 }
 .tag-cloud .badge {
     font-size: 0.8em;
     text-decoration: none;
+    display: inline-block;
+    margin-bottom: 0.2em;
 }
 .bio-cell {
     max-width: 300px;
