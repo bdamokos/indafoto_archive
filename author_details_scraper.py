@@ -224,6 +224,10 @@ def extract_author_details(url, session=None):
                 if content_div:
                     for tag in content_div.find_all('a', class_=lambda x: x and x.startswith('tag-')):
                         tag_name = tag.get_text(strip=True)
+                        # Skip empty tags
+                        if not tag_name:
+                            continue
+                            
                         tag_url = tag.get('href', '')
                         # Extract tag weight from class (e.g., 'tag-3' means weight 3)
                         tag_weight = None
