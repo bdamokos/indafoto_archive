@@ -1782,7 +1782,7 @@ class ThreadPool:
         except queue.Empty:
             pass
 
-def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
+def process_image_list(image_data_list, conn, cursor, sample_rate=1.0, progress_callback=None):
     """Process a list of images with improved connection handling."""
     global consecutive_failures, consecutive_successes, current_wait_time, current_workers
     
@@ -2035,6 +2035,12 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                             else:
                                 metadata_progress['current_page'] += 1
                                 metadata_pbar.update(1)
+                                
+                                # Call progress callback if provided
+                                if progress_callback:
+                                    total = metadata_progress['total_current']
+                                    current = metadata_progress['current_page']
+                                    progress_callback(current, total)
                 except queue.Empty:
                     pass
                 
@@ -2289,192 +2295,535 @@ def estimate_space_requirements(downloaded_bytes, pages_processed, total_pages):
     remaining_pages = total_pages - pages_processed
     estimated_remaining_bytes = avg_bytes_per_page * remaining_pages
     
-    return {
-        'avg_mb_per_page': avg_bytes_per_page / (2**20),  # Convert to MB
-        'estimated_remaining_gb': estimated_remaining_bytes / (2**30),  # Convert to GB
-        'total_estimated_gb': (downloaded_bytes + estimated_remaining_bytes) / (2**30)
-    }
+    return estimated_remaining_bytes / (1024 * 1024 * 1024)  # Return in GB
+
+def get_search_url(page_number):
+    """Return the search URL for a given page number."""
+    return SEARCH_URL_TEMPLATE.format(page_number)
 
 def crawl_images(start_offset=0, retry_mode=False):
-    """Main function to crawl images and save metadata."""
-    global current_workers, consecutive_failures, consecutive_successes, current_wait_time, last_restart_time
-    
-    # Start the restart timer
-    global restart_timer
-    restart_timer = threading.Timer(60, check_restart_timer)
-    restart_timer.start()
-    
-    conn = init_db()
-    cursor = conn.cursor()
-    
-    # Check initial disk space
-    free_space_gb = check_disk_space(BASE_DIR)
-    logger.info(f"Initial free space: {free_space_gb:.2f}GB")
-    
-    # Initialize space tracking
-    total_downloaded_bytes = 0
-    pages_processed = 0
+    """Crawl and download images with parallel page processing."""
+    global should_restart, current_page, current_wait_time, consecutive_failures, consecutive_successes
     
     try:
-        # If in retry mode, first check for pages with 0 images in completed_pages
-        if retry_mode:
-            cursor.execute("""
-                SELECT page_number, completion_date 
-                FROM completed_pages 
-                WHERE image_count = 0 
-                ORDER BY page_number
-            """)
-            zero_image_pages = cursor.fetchall()
-            
-            if zero_image_pages:
-                logger.info(f"Found {len(zero_image_pages)} pages with 0 images to retry")
-                for page_number, completion_date in zero_image_pages:
-                    search_page_url = SEARCH_URL_TEMPLATE.format(page_number)
-                    cursor.execute("""
-                        INSERT OR REPLACE INTO failed_pages (
-                            page_number, url, error, last_attempt, status, attempts
-                        ) VALUES (?, ?, ?, ?, 'zero_images', 0)
-                    """, (page_number, search_page_url, "Page had 0 images", datetime.now().isoformat()))
-                    conn.commit()
-                    logger.info(f"Added page {page_number} to retry queue due to 0 images")
+        # Start the restart timer
+        global restart_timer
+        restart_timer = threading.Timer(60, check_restart_timer)
+        restart_timer.start()
         
-        for page in tqdm(range(start_offset, TOTAL_PAGES), desc="Crawling pages", colour='blue', position=12):
-            # Check if we should restart
-            if should_restart:
-                logger.info("Restart flag set, initiating restart...")
-                restart_script()
-            
+        conn = init_db()
+        cursor = conn.cursor()
+        
+        # Get banned authors
+        banned_authors = get_banned_authors(conn)
+        for author in banned_authors:
+            banned_authors_set.add(author)
+        
+        # Check initial disk space
+        free_space_gb = check_disk_space(BASE_DIR)
+        logger.info(f"Initial free space: {free_space_gb:.2f}GB")
+        
+        # Initialize space tracking
+        total_downloaded_bytes = 0
+        pages_processed = 0
+        
+        # Process pages with retry mode
+        if retry_mode:
+            logger.info("Running in retry mode. Processing failed pages first...")
+            retry_count = retry_failed_pages(conn, cursor)
+            logger.info(f"Retry mode completed. Processed {retry_count} failed pages.")
+        
+        # Track running status
+        logger.info(f"Starting crawl from page {start_offset}")
+        
+        # Setup for parallel page processing
+        page_queue = queue.Queue(maxsize=5)        # Queue for pages to process
+        db_command_queue = queue.Queue(maxsize=50) # Queue for database operations
+        active_page_threads = {}                   # Track active page processing threads
+        pending_results = {}                       # Store results by page number
+        completed_pages = set()                    # Set of completed page numbers
+        page_metadata_progress = {}                # Track metadata progress by page
+        
+        # Define database operation types
+        DB_CHECK_PAGE = 1         # Check if page is already completed
+        DB_INSERT_FAILED = 2      # Insert into failed_pages
+        DB_PROCESS_IMAGES = 3     # Process a list of images
+        DB_MARK_COMPLETED = 4     # Mark a page as completed
+        DB_UPDATE_AUTHOR = 5      # Update author stats
+        
+        # Helper function to process a single page in its own thread
+        def process_page_thread(page_number, page_url):
+            """Thread function to process a single page"""
+            logger.info(f"Starting processing for page {page_number}")
             try:
-                # Check if page was already completed successfully
-                cursor.execute("""
-                    SELECT completion_date, image_count 
-                    FROM completed_pages 
-                    WHERE page_number = ?
-                """, (page,))
-                result = cursor.fetchone()
+                # First check if page already exists - ask main thread to check
+                response_queue = queue.Queue()
+                db_command_queue.put((
+                    DB_CHECK_PAGE, 
+                    {
+                        'page_number': page_number,
+                        'callback_queue': response_queue
+                    }
+                ))
                 
-                if result:
-                    completion_date, image_count = result
-                    if image_count > 0:
-                        logger.info(f"Skipping page {page} - already completed successfully with {image_count} images")
-                        continue
+                # Wait for the response from the main thread
+                check_result = response_queue.get()
+                
+                if check_result and check_result.get('exists', False):
+                    # Page exists and has images
+                    if check_result.get('image_count', 0) > 0:
+                        logger.info(f"Skipping page {page_number} - already completed with {check_result['image_count']} images")
+                        pending_results[page_number] = {
+                            'success': True, 
+                            'skipped': True,
+                            'image_count': check_result['image_count']
+                        }
+                        return
                     else:
-                        logger.info(f"Retrying page {page} - completed but had 0 images")
-                
-                # Check disk space before each page
-                free_space_gb = get_free_space_gb(BASE_DIR)
-                if free_space_gb < 2:
-                    raise RuntimeError(f"Critical: Only {free_space_gb:.2f}GB space remaining. Stopping crawler.")
-                
-                search_page_url = SEARCH_URL_TEMPLATE.format(page)
+                        logger.info(f"Retrying page {page_number} - completed but had 0 images")
                 
                 # Track page size before downloading
                 page_size_before = sum(f.stat().st_size for f in Path(BASE_DIR).rglob('*') if f.is_file())
                 
+                # Create a dedicated session for this thread
+                session = create_session(max_retries=3)
+                
                 try:
-                    image_data_list = get_image_links(search_page_url, attempt=1)
+                    # Get images from the page
+                    image_data_list = get_image_links(page_url, session=session)
+                    
+                    if not image_data_list:
+                        logger.warning(f"No images found on page {page_number}")
+                        
+                        # Add to failed pages - ask main thread to do this
+                        response_queue = queue.Queue()
+                        db_command_queue.put((
+                            DB_INSERT_FAILED,
+                            {
+                                'page_number': page_number,
+                                'page_url': page_url,
+                                'error': "Page had 0 images",
+                                'status': 'zero_images',
+                                'callback_queue': response_queue
+                            }
+                        ))
+                        
+                        # Wait for completion
+                        response_queue.get()
+                        
+                        pending_results[page_number] = {
+                            'success': False,
+                            'image_count': 0,
+                            'message': 'No images found'
+                        }
+                        return
+                    
+                    # Request image processing from the main thread
+                    result_queue = queue.Queue()
+                    db_command_queue.put((
+                        DB_PROCESS_IMAGES,
+                        {
+                            'image_data_list': image_data_list,
+                            'page_number': page_number,
+                            'callback_queue': result_queue
+                        }
+                    ))
+                    
+                    # Wait for processing result
+                    process_result = result_queue.get()
+                    success = process_result.get('success', False)
+                    stats = process_result.get('stats', {})
+                    
+                    # Calculate space used by this page
+                    page_size_after = sum(f.stat().st_size for f in Path(BASE_DIR).rglob('*') if f.is_file())
+                    page_downloaded_bytes = page_size_after - page_size_before
+                    
+                    if success:
+                        # Mark page as completed - ask main thread to do this
+                        response_queue = queue.Queue()
+                        db_command_queue.put((
+                            DB_MARK_COMPLETED,
+                            {
+                                'page_number': page_number,
+                                'image_count': stats['processed_count'],
+                                'downloaded_bytes': page_downloaded_bytes,
+                                'callback_queue': response_queue
+                            }
+                        ))
+                        
+                        # Wait for completion
+                        response_queue.get()
+                        
+                        # Update author stats - ask main thread to do this
+                        for author, count in stats['author_counts'].items():
+                            response_queue = queue.Queue()
+                            db_command_queue.put((
+                                DB_UPDATE_AUTHOR,
+                                {
+                                    'author': author,
+                                    'count': count,
+                                    'callback_queue': response_queue
+                                }
+                            ))
+                            
+                            # Wait for completion
+                            response_queue.get()
+                        
+                        pending_results[page_number] = {
+                            'success': True,
+                            'image_count': stats['processed_count'],
+                            'stats': stats,
+                            'downloaded_bytes': page_downloaded_bytes,
+                            'message': 'Completed successfully'
+                        }
+                    else:
+                        # If processing wasn't completely successful, add to failed_pages
+                        error_msg = stats.get('error', 'Unknown error')
+                        
+                        # Add to failed pages - ask main thread to do this
+                        response_queue = queue.Queue()
+                        db_command_queue.put((
+                            DB_INSERT_FAILED,
+                            {
+                                'page_number': page_number,
+                                'page_url': page_url,
+                                'error': error_msg,
+                                'status': 'pending',
+                                'callback_queue': response_queue
+                            }
+                        ))
+                        
+                        # Wait for completion
+                        response_queue.get()
+                        
+                        pending_results[page_number] = {
+                            'success': False,
+                            'image_count': stats['processed_count'],
+                            'stats': stats,
+                            'downloaded_bytes': page_downloaded_bytes,
+                            'message': f'Failed with error: {error_msg}'
+                        }
+                
                 except requests.exceptions.HTTPError as e:
                     if any(str(code) in str(e) for code in [503, 504, 500, 502, 507, 508, 509]):
-                        # Handle 50x Server Error with 5-minute cooldown
-                        error_code = re.search(r'\((\d+)\)', str(e)).group(1)
-                        logger.error(f"Server Error ({error_code}) for page {page}, implementing 5-minute cooldown")
+                        # Handle 50x Server Error - add to failed pages
+                        error_code = re.search(r'\((\d+)\)', str(e))
+                        error_code = error_code.group(1) if error_code else 'unknown'
+                        logger.error(f"Server Error ({error_code}) for page {page_number}")
                         
-                        # Add to failed_pages with special status
-                        cursor.execute("""
-                            INSERT OR REPLACE INTO failed_pages (
-                                page_number, url, error, last_attempt, status, attempts
-                            ) VALUES (?, ?, ?, ?, 'server_error', 0)
-                        """, (page, search_page_url, f"Server Error ({error_code})", datetime.now().isoformat()))
-                        conn.commit()
+                        # Add to failed pages - ask main thread to do this
+                        response_queue = queue.Queue()
+                        db_command_queue.put((
+                            DB_INSERT_FAILED,
+                            {
+                                'page_number': page_number,
+                                'page_url': page_url,
+                                'error': f"Server Error ({error_code})",
+                                'status': 'server_error',
+                                'callback_queue': response_queue
+                            }
+                        ))
                         
-                        # Implement 5-minute cooldown
-                        cooldown_minutes = 5
-                        logger.info(f"Waiting {cooldown_minutes} minutes before continuing...")
-                        time.sleep(cooldown_minutes * 60)
-                        continue
+                        # Wait for completion
+                        response_queue.get()
+                        
+                        pending_results[page_number] = {
+                            'success': False,
+                            'image_count': 0,
+                            'message': f'Server error {error_code}'
+                        }
                     else:
                         # Handle other HTTP errors
-                        logger.error(f"HTTP error for page {page}: {e}")
-                        cursor.execute("""
-                            INSERT OR REPLACE INTO failed_pages (
-                                page_number, url, error, last_attempt, status, attempts
-                            ) VALUES (?, ?, ?, ?, 'error', 0)
-                        """, (page, search_page_url, str(e), datetime.now().isoformat()))
-                        conn.commit()
-                        continue
+                        logger.error(f"HTTP error for page {page_number}: {e}")
+                        
+                        # Add to failed pages - ask main thread to do this
+                        response_queue = queue.Queue()
+                        db_command_queue.put((
+                            DB_INSERT_FAILED,
+                            {
+                                'page_number': page_number,
+                                'page_url': page_url,
+                                'error': str(e),
+                                'status': 'error',
+                                'callback_queue': response_queue
+                            }
+                        ))
+                        
+                        # Wait for completion
+                        response_queue.get()
+                        
+                        pending_results[page_number] = {
+                            'success': False,
+                            'image_count': 0,
+                            'message': f'HTTP error: {str(e)}'
+                        }
                 
-                # Process the image list
-                success, stats = process_image_list(image_data_list, conn, cursor)
+                logger.info(f"Completed processing for page {page_number}")
                 
-                # Calculate space used by this page
-                page_size_after = sum(f.stat().st_size for f in Path(BASE_DIR).rglob('*') if f.is_file())
-                page_downloaded_bytes = page_size_after - page_size_before
-                total_downloaded_bytes += page_downloaded_bytes
+            except Exception as e:
+                logger.error(f"Error processing page {page_number}: {e}")
                 
-                if success:
-                    # Mark page as completed with image count
+                try:
+                    # Add to failed pages - ask main thread to do this
+                    response_queue = queue.Queue()
+                    db_command_queue.put((
+                        DB_INSERT_FAILED,
+                        {
+                            'page_number': page_number,
+                            'page_url': page_url,
+                            'error': str(e),
+                            'status': 'error',
+                            'callback_queue': response_queue
+                        }
+                    ))
+                    
+                    # Wait for completion
+                    response_queue.get()
+                except Exception as inner_e:
+                    logger.error(f"Failed to log error in database: {inner_e}")
+                
+                pending_results[page_number] = {
+                    'success': False,
+                    'image_count': 0,
+                    'message': f'Error: {str(e)}'
+                }
+        
+        # Update metadata progress and potentially start the next page
+        def update_metadata_progress(page_number, current, total):
+            """Update progress for a page and possibly start next page processing"""
+            progress = current / total if total > 0 else 0
+            page_metadata_progress[page_number] = progress
+            
+            # If we've processed 80% of the metadata for the current page, start the next page
+            if progress >= 0.8 and page_number + 1 not in active_page_threads and page_number + 1 not in completed_pages:
+                try:
+                    # Only start next page if not at capacity and not already queued
+                    if not page_queue.full() and page_number + 1 < TOTAL_PAGES:
+                        next_page_url = get_search_url(page_number + 1)
+                        page_queue.put((page_number + 1, next_page_url), block=False)
+                        logger.info(f"Queued page {page_number + 1} after reaching 80% metadata on page {page_number}")
+                except queue.Full:
+                    # Queue is full, we'll try again later
+                    logger.debug(f"Page queue full, waiting to queue page {page_number + 1}")
+        
+        # Queue the initial page to start processing
+        initial_page = start_offset
+        page_queue.put((initial_page, get_search_url(initial_page)))
+        logger.info(f"Queued initial page {initial_page}")
+        
+        # Function to handle database commands in the main thread
+        def process_db_command(command_type, params):
+            try:
+                if command_type == DB_CHECK_PAGE:
+                    # Check if a page is already completed
+                    page_number = params['page_number']
+                    callback_queue = params['callback_queue']
+                    
+                    cursor.execute("""
+                        SELECT completion_date, image_count 
+                        FROM completed_pages 
+                        WHERE page_number = ?
+                    """, (page_number,))
+                    
+                    result = cursor.fetchone()
+                    if result:
+                        completion_date, image_count = result
+                        callback_queue.put({
+                            'exists': True,
+                            'completion_date': completion_date,
+                            'image_count': image_count
+                        })
+                    else:
+                        callback_queue.put({'exists': False})
+                    
+                elif command_type == DB_INSERT_FAILED:
+                    # Insert a page into the failed_pages table
+                    page_number = params['page_number']
+                    page_url = params['page_url']
+                    error = params['error']
+                    status = params['status']
+                    callback_queue = params['callback_queue']
+                    
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO failed_pages (
+                            page_number, url, error, last_attempt, status, attempts
+                        ) VALUES (?, ?, ?, ?, ?, 0)
+                    """, (page_number, page_url, error, datetime.now().isoformat(), status))
+                    
+                    conn.commit()
+                    callback_queue.put({'success': True})
+                
+                elif command_type == DB_PROCESS_IMAGES:
+                    # Process a list of images
+                    image_data_list = params['image_data_list']
+                    page_number = params['page_number']
+                    callback_queue = params['callback_queue']
+                    
+                    # Process images with progress tracking
+                    success, stats = process_image_list(
+                        image_data_list, 
+                        conn, 
+                        cursor,
+                        progress_callback=lambda current, total: update_metadata_progress(page_number, current, total)
+                    )
+                    
+                    callback_queue.put({
+                        'success': success,
+                        'stats': stats
+                    })
+                
+                elif command_type == DB_MARK_COMPLETED:
+                    # Mark a page as completed
+                    page_number = params['page_number']
+                    image_count = params['image_count']
+                    downloaded_bytes = params['downloaded_bytes']
+                    callback_queue = params['callback_queue']
+                    
                     cursor.execute("""
                         INSERT OR REPLACE INTO completed_pages (
                             page_number, completion_date, image_count, total_size_bytes
                         ) VALUES (?, ?, ?, ?)
-                    """, (page, datetime.now().isoformat(), stats['processed_count'], page_downloaded_bytes))
-                    conn.commit()
+                    """, (page_number, datetime.now().isoformat(), image_count, downloaded_bytes))
                     
+                    conn.commit()
+                    callback_queue.put({'success': True})
+                
+                elif command_type == DB_UPDATE_AUTHOR:
                     # Update author stats
-                    for author, count in stats['author_counts'].items():
-                        cursor.execute("""
-                            UPDATE author_stats 
-                            SET total_images = total_images + ?,
-                                last_updated = ?
-                            WHERE author = ?
-                        """, (count, datetime.now().isoformat(), author))
-                        conn.commit()
+                    author = params['author']
+                    count = params['count']
+                    callback_queue = params['callback_queue']
                     
-                    pages_processed += 1
-                    logger.info(f"Successfully completed page {page} - "
-                              f"Processed: {stats['processed_count']}, "
-                              f"Failed: {stats['failed_count']}, "
-                              f"Total: {stats['total_images']}, "
-                              f"Workers: {stats['current_workers']}")
-                else:
-                    # If processing wasn't completely successful, add to failed_pages
-                    error_msg = stats.get('error', 'Unknown error')
                     cursor.execute("""
-                        INSERT OR REPLACE INTO failed_pages (
-                            page_number, url, error, last_attempt, status, attempts
-                        ) VALUES (?, ?, ?, ?, 'pending', 0)
-                    """, (page, search_page_url, error_msg, datetime.now().isoformat()))
+                        UPDATE author_stats 
+                        SET total_images = total_images + ?,
+                            last_updated = ?
+                        WHERE author = ?
+                    """, (count, datetime.now().isoformat(), author))
+                    
                     conn.commit()
-                    logger.warning(f"Failed to process all images on page {page} - "
-                                 f"Processed: {stats['processed_count']}, "
-                                 f"Failed: {stats['failed_count']}, "
-                                 f"Total: {stats['total_images']}, "
-                                 f"Workers: {stats['current_workers']}")
+                    callback_queue.put({'success': True})
                 
-                # Rate limiting between pages
-                time.sleep(BASE_RATE_LIMIT)
-                
+                return True
             except Exception as e:
-                logger.error(f"Error processing page {page}: {e}")
-                # Add to failed_pages with error status
-                cursor.execute("""
-                    INSERT OR REPLACE INTO failed_pages (
-                        page_number, url, error, last_attempt, status, attempts
-                    ) VALUES (?, ?, ?, ?, 'error', 0)
-                """, (page, search_page_url, str(e), datetime.now().isoformat()))
-                conn.commit()
-                continue
-    
-    except KeyboardInterrupt:
-        logger.info("\nCrawling interrupted by user")
-    finally:
-        # Print summary
+                logger.error(f"Error processing database command {command_type}: {e}")
+                if 'callback_queue' in params:
+                    params['callback_queue'].put({'success': False, 'error': str(e)})
+                return False
+        
+        # Main processing loop
+        with tqdm(desc="Pages processed", colour='blue', position=0) as page_pbar:
+            while True:
+                try:
+                    # Check for restart timer
+                    if should_restart:
+                        logger.info("Restart timer triggered, initiating restart...")
+                        return
+                    
+                    # Check disk space periodically
+                    free_space_gb = get_free_space_gb(BASE_DIR)
+                    if free_space_gb < 2:
+                        logger.critical(f"Only {free_space_gb:.2f}GB free space - stopping crawler")
+                        raise RuntimeError(f"Critical: Only {free_space_gb:.2f}GB space remaining.")
+                    
+                    # Process database commands first
+                    try:
+                        while True:
+                            cmd = db_command_queue.get_nowait()
+                            process_db_command(cmd[0], cmd[1])
+                    except queue.Empty:
+                        pass
+                    
+                    # Clean up completed threads and process results
+                    for page_num in list(active_page_threads.keys()):
+                        thread = active_page_threads[page_num]
+                        if not thread.is_alive():
+                            # Thread is done
+                            del active_page_threads[page_num]
+                            completed_pages.add(page_num)
+                            page_pbar.update(1)
+                            
+                            # Process the results
+                            if page_num in pending_results:
+                                result = pending_results[page_num]
+                                if result.get('success', False):
+                                    # Successful page
+                                    image_count = result.get('image_count', 0)
+                                    if result.get('skipped', False):
+                                        logger.info(f"Page {page_num} was already processed with {image_count} images")
+                                    else:
+                                        # Update downloaded bytes and page count for new pages
+                                        downloaded_bytes = result.get('downloaded_bytes', 0)
+                                        total_downloaded_bytes += downloaded_bytes
+                                        pages_processed += 1
+                                        
+                                        stats = result.get('stats', {})
+                                        logger.info(f"Successfully completed page {page_num} - "
+                                                 f"Processed: {stats.get('processed_count', 0)}, "
+                                                 f"Failed: {stats.get('failed_count', 0)}, "
+                                                 f"Total: {stats.get('total_images', 0)}, "
+                                                 f"Workers: {stats.get('current_workers', 0)}")
+                                else:
+                                    # Failed page
+                                    logger.warning(f"Failed to process page {page_num}: {result.get('message', 'Unknown error')}")
+                    
+                    # Start new threads if needed and we're below the worker limit
+                    if len(active_page_threads) < 3:  # Maximum concurrent pages
+                        try:
+                            page_number, page_url = page_queue.get(block=False)
+                            
+                            # Skip if already processing or completed
+                            if page_number in active_page_threads or page_number in completed_pages:
+                                continue
+                            
+                            # Start the thread
+                            thread = threading.Thread(
+                                target=process_page_thread,
+                                args=(page_number, page_url)
+                            )
+                            thread.daemon = True
+                            thread.start()
+                            active_page_threads[page_number] = thread
+                            logger.info(f"Started processing thread for page {page_number}")
+                        except queue.Empty:
+                            # Nothing in the queue right now
+                            pass
+                    
+                    # Check if we've reached the end of processing
+                    if not active_page_threads and page_queue.empty():
+                        highest_completed = max(completed_pages) if completed_pages else initial_page - 1
+                        if highest_completed >= TOTAL_PAGES - 1:
+                            logger.info("Reached the last page, crawl complete")
+                            break
+                        elif highest_completed < TOTAL_PAGES - 1:
+                            # Queue the next page after the highest completed one
+                            next_page = highest_completed + 1
+                            logger.info(f"Queueing next page {next_page} after completion")
+                            page_queue.put((next_page, get_search_url(next_page)))
+                    
+                    # Short sleep to prevent busy waiting
+                    time.sleep(0.5)
+                
+                except KeyboardInterrupt:
+                    logger.info("Keyboard interrupt received, stopping...")
+                    break
+        
         logger.info("\nCrawling Summary:")
         logger.info(f"Pages processed: {pages_processed}")
         logger.info(f"Total downloaded: {total_downloaded_bytes / (1024*1024*1024):.2f}GB")
         logger.info(f"Final worker count: {current_workers}")
-        
-        conn.close()
+        logger.info("Crawl completed successfully")
+    
+    except Exception as e:
+        logger.error(f"Crawl failed with error: {e}")
+        logger.exception("Exception details:")
+    
+    finally:
+        # Ensure database connection is closed
+        try:
+            conn.close()
+        except:
+            pass
 
 def test_album_extraction():
     """Test function to verify album and collection extraction from specific pages."""
