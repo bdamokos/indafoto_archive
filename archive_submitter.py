@@ -284,6 +284,23 @@ class ArchiveSubmitter:
         # Return None for unrecognized patterns
         return None
 
+    def _normalize_image_url(self, url):
+        """
+        Normalize image URLs to handle equivalent patterns when checking archive results.
+        For example, URLs with /user or /user?token=123243 suffixes are equivalent to their base image URL.
+        """
+        if not url:
+            return url
+            
+        # Handle URLs with /user suffix (with or without query parameters)
+        if '/user' in url and '/image/' in url:
+            # Find the position of /user
+            user_pos = url.find('/user')
+            # Return everything up to /user
+            return url[:user_pos]
+            
+        return url
+
     def check_archive_org(self, url):
         """Check if URL is already archived on archive.org using CDX API."""
         try:
@@ -323,6 +340,19 @@ class ArchiveSubmitter:
                     snapshot_date = datetime.strptime(timestamp, '%Y%m%d%H%M%S')
                     cutoff_date = datetime(2024, 7, 1)
                     if snapshot_date >= cutoff_date:
+                        # For image pages, check if we have a normalized version in our database
+                        if '/image/' in url:
+                            normalized_url = self._normalize_image_url(url)
+                            self.cursor.execute("""
+                                SELECT archive_url, submission_date
+                                FROM archive_submissions
+                                WHERE url = ? AND archive_service = 'archive.org' AND status = 'success'
+                                ORDER BY submission_date DESC
+                                LIMIT 1
+                            """, (normalized_url,))
+                            normalized_result = self.cursor.fetchone()
+                            if normalized_result:
+                                return True, normalized_result[0]
                         return True, f"https://web.archive.org/web/{timestamp}/{url}"
             return False, None
         except Exception as e:
@@ -369,6 +399,19 @@ class ArchiveSubmitter:
                         archive_date = datetime.strptime(datetime_match.group(1), '%a, %d %b %Y %H:%M:%S GMT')
                         cutoff_date = datetime(2024, 7, 1)
                         if archive_date >= cutoff_date:
+                            # For image pages, check if we have a normalized version in our database
+                            if '/image/' in url:
+                                normalized_url = self._normalize_image_url(url)
+                                self.cursor.execute("""
+                                    SELECT archive_url, submission_date
+                                    FROM archive_submissions
+                                    WHERE url = ? AND archive_service = 'archive.ph' AND status = 'success'
+                                    ORDER BY submission_date DESC
+                                    LIMIT 1
+                                """, (normalized_url,))
+                                normalized_result = self.cursor.fetchone()
+                                if normalized_result:
+                                    return True, normalized_result[0]
                             return True, f"https://archive.ph/{url}"
             return False, None
         except Exception as e:
