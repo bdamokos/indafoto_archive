@@ -203,16 +203,25 @@ def monitor_system_resources(interval=5, report_functions=False):
                         io_read_rate = io_write_rate = 0
                     
                     disk_io_history.append((time.time(), io_read_mb, io_write_mb))
-                except:
+                except (psutil.Error, AttributeError) as e:
+                    # Log the specific error that occurred with disk I/O
+                    logger.debug(f"Failed to get process disk I/O stats: {str(e)}")
                     io_read_mb = io_write_mb = io_read_rate = io_write_rate = 0
                 
-                # Network I/O
+                # Network I/O - Get process-specific network I/O if available
                 try:
+                    # Attempt to get process-specific network counters (not supported on all platforms)
+                    net_io = process.net_connections()
+                    # If we got here, we have connections but not bytes, so use system counters
                     net_io = psutil.net_io_counters()
                     net_sent_mb = net_io.bytes_sent / (1024 * 1024)
                     net_recv_mb = net_io.bytes_recv / (1024 * 1024)
-                except:
+                    # Add a note that this is system-wide
+                    net_io_note = " (system-wide)"
+                except (psutil.Error, AttributeError) as e:
+                    logger.debug(f"Failed to get network I/O stats: {str(e)}")
                     net_sent_mb = net_recv_mb = 0
+                    net_io_note = ""
                 
                 # Record stats
                 timestamp = time.time()
@@ -280,11 +289,11 @@ def monitor_system_resources(interval=5, report_functions=False):
                     
                     stats_block.extend([
                         "├─────────────────────────────────────────────────────────────────┤",
-                        f"│ DISK I/O                                                        │",
+                        f"│ DISK I/O (Process-specific)                                      │",
                         f"│   Read:          {io_read_mb:8.1f} MB (Rate: {io_read_rate:6.2f} MB/s)             │",
                         f"│   Write:         {io_write_mb:8.1f} MB (Rate: {io_write_rate:6.2f} MB/s)             │",
                         "├─────────────────────────────────────────────────────────────────┤",
-                        f"│ NETWORK I/O                                                     │",
+                        f"│ NETWORK I/O{net_io_note}                                          │",
                         f"│   Sent:          {net_sent_mb:8.1f} MB                                   │",
                         f"│   Received:      {net_recv_mb:8.1f} MB                                   │",
                         "└─────────────────────────────────────────────────────────────────┘"
