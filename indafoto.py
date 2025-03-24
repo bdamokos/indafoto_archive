@@ -1776,9 +1776,9 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
         session = create_session(max_retries=3, pool_connections=current_workers)
         session_pool.put(session)
     
-    # Queue for next page's metadata
-    next_batch_queue = queue.Queue(maxsize=current_workers * 2)
-    db_check_queue = queue.Queue()
+    # Queue for next page's metadata with larger buffer
+    next_batch_queue = queue.Queue(maxsize=current_workers * 4)  # Increased buffer size
+    db_check_queue = queue.Queue(maxsize=current_workers * 4)    # Added size limit
     
     # Track active tasks and completion status
     active_tasks = {
@@ -1790,6 +1790,14 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
         'producer_done': False,
         'metadata_done': False,
         'all_tasks_done': False
+    }
+    
+    # Track metadata extraction progress
+    metadata_progress = {
+        'current_page': 0,
+        'next_page': 0,
+        'total_current': len(image_data_list),
+        'total_next': 0  # Will be updated when we know the next page size
     }
     
     def get_session():
@@ -1867,24 +1875,49 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                     page_url = image_data.get('page_url', '')
                     
                     if not url or not page_url:
-                        db_check_queue.put(('error', image_data, "Skipping image with no URL or page URL"))
+                        # Use put with timeout to prevent blocking forever
+                        try:
+                            db_check_queue.put(('error', image_data, "Skipping image with no URL or page URL"), timeout=30)
+                        except queue.Full:
+                            logger.warning("DB check queue full, waiting for space...")
+                            db_check_queue.put(('error', image_data, "Skipping image with no URL or page URL"), block=True)
                         continue
                     
                     # Extract image ID from URL
                     image_id = extract_image_id(url)
                     if not image_id:
-                        db_check_queue.put(('error', image_data, f"Could not extract image ID from URL: {url}"))
+                        try:
+                            db_check_queue.put(('error', image_data, f"Could not extract image ID from URL: {url}"), timeout=30)
+                        except queue.Full:
+                            logger.warning("DB check queue full, waiting for space...")
+                            db_check_queue.put(('error', image_data, f"Could not extract image ID from URL: {url}"), block=True)
                         continue
                     
-                    # Queue the image for database check in main thread
-                    db_check_queue.put(('check', image_data, image_id))
+                    # Queue the image for database check in main thread with backpressure
+                    try:
+                        db_check_queue.put(('check', image_data, image_id), timeout=30)
+                    except queue.Full:
+                        logger.warning("DB check queue full, implementing backpressure...")
+                        # Wait for queue to have space
+                        db_check_queue.put(('check', image_data, image_id), block=True)
+                        
                 except Exception as e:
-                    db_check_queue.put(('error', image_data, str(e)))
+                    try:
+                        db_check_queue.put(('error', image_data, str(e)), timeout=30)
+                    except queue.Full:
+                        logger.warning("DB check queue full on error, waiting...")
+                        db_check_queue.put(('error', image_data, str(e)), block=True)
         except Exception as e:
             logger.error(f"Error in metadata producer: {e}")
         finally:
-            # Signal end of input
-            db_check_queue.put(('done', None, None))
+            # Signal end of input - keep trying until it succeeds
+            while True:
+                try:
+                    db_check_queue.put(('done', None, None), timeout=30)
+                    break
+                except queue.Full:
+                    logger.warning("DB check queue full when trying to signal completion, retrying...")
+                    time.sleep(1)
             completion_status['producer_done'] = True
     
     try:
@@ -1895,8 +1928,11 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
         
         logger.info("Starting image processing pipeline")
         
-        # Process images through the pipeline using thread pools
-        with tqdm(total=len(image_data_list), desc="Processing images", colour='yellow') as pbar:
+        # Create progress bars
+        with tqdm(total=len(image_data_list), desc="Processing images", colour='yellow', position=0) as pbar, \
+             tqdm(total=0, desc="Metadata extraction", colour='purple', position=1) as metadata_pbar, \
+             tqdm(total=0, desc="Next page metadata", colour='orange', position=2) as next_page_pbar:
+            
             # Process results and chain tasks
             while not completion_status['all_tasks_done']:
                 # Check if all tasks are complete
@@ -1938,18 +1974,35 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                         pbar.update(1)
                         continue
                     
-                    # Add to next batch queue for processing
-                    next_batch_queue.put(image_data)
+                    # Add to next batch queue for processing with backpressure
+                    try:
+                        next_batch_queue.put(image_data, timeout=30)
+                    except queue.Full:
+                        logger.warning("Next batch queue full, implementing backpressure...")
+                        # If queue is full, wait for space
+                        next_batch_queue.put(image_data, block=True)
                 except queue.Empty:
                     pass
                 
-                # Process next batch
+                # Process next batch with controlled rate
                 try:
                     while not next_batch_queue.empty():
+                        # Check if metadata pool is getting too full
+                        if active_tasks['metadata'] >= current_workers * 2:
+                            logger.debug("Metadata pool busy, pausing batch processing...")
+                            break
+                            
                         image_data = next_batch_queue.get_nowait()
                         if random.random() <= sample_rate:
                             active_tasks['metadata'] += 1
                             metadata_pool.add_task(process_metadata, image_data)
+                            # Update metadata progress bar
+                            if 'next_page' in image_data.get('page_url', ''):
+                                metadata_progress['next_page'] += 1
+                                next_page_pbar.update(1)
+                            else:
+                                metadata_progress['current_page'] += 1
+                                metadata_pbar.update(1)
                 except queue.Empty:
                     pass
                 
