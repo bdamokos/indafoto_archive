@@ -2077,50 +2077,79 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                                 
                                 image_id = cursor.lastrowid
                                 
-                                # Process collections and albums
-                                for gallery in metadata.get('collections', []):
-                                    cursor.execute("""
+                                # Batch process collections
+                                if metadata.get('collections'):
+                                    collection_values = [(g['id'], g['title'], g['url'], g['is_public']) 
+                                                      for g in metadata['collections']]
+                                    cursor.executemany("""
                                         INSERT OR IGNORE INTO collections (collection_id, title, url, is_public)
                                         VALUES (?, ?, ?, ?)
-                                    """, (gallery['id'], gallery['title'], gallery['url'], gallery['is_public']))
+                                    """, collection_values)
                                     
-                                    cursor.execute("SELECT id FROM collections WHERE collection_id = ?", (gallery['id'],))
-                                    gallery_db_id = cursor.fetchone()[0]
-                                    
+                                    # Get collection IDs in a single query
                                     cursor.execute("""
+                                        SELECT collection_id, id FROM collections 
+                                        WHERE collection_id IN ({})
+                                    """.format(','.join('?' * len(collection_values))), 
+                                    [v[0] for v in collection_values])
+                                    collection_ids = {row[0]: row[1] for row in cursor.fetchall()}
+                                    
+                                    # Batch insert image_collections
+                                    image_collection_values = [(image_id, collection_ids[g['id']]) 
+                                                            for g in metadata['collections']]
+                                    cursor.executemany("""
                                         INSERT INTO image_collections (image_id, collection_id)
                                         VALUES (?, ?)
-                                    """, (image_id, gallery_db_id))
+                                    """, image_collection_values)
                                 
-                                # Process albums
-                                for gallery in metadata.get('albums', []):
-                                    cursor.execute("""
+                                # Batch process albums
+                                if metadata.get('albums'):
+                                    album_values = [(g['id'], g['title'], g['url'], g['is_public']) 
+                                                  for g in metadata['albums']]
+                                    cursor.executemany("""
                                         INSERT OR IGNORE INTO albums (album_id, title, url, is_public)
                                         VALUES (?, ?, ?, ?)
-                                    """, (gallery['id'], gallery['title'], gallery['url'], gallery['is_public']))
+                                    """, album_values)
                                     
-                                    cursor.execute("SELECT id FROM albums WHERE album_id = ?", (gallery['id'],))
-                                    gallery_db_id = cursor.fetchone()[0]
-                                    
+                                    # Get album IDs in a single query
                                     cursor.execute("""
+                                        SELECT album_id, id FROM albums 
+                                        WHERE album_id IN ({})
+                                    """.format(','.join('?' * len(album_values))), 
+                                    [v[0] for v in album_values])
+                                    album_ids = {row[0]: row[1] for row in cursor.fetchall()}
+                                    
+                                    # Batch insert image_albums
+                                    image_album_values = [(image_id, album_ids[g['id']]) 
+                                                        for g in metadata['albums']]
+                                    cursor.executemany("""
                                         INSERT INTO image_albums (image_id, album_id)
                                         VALUES (?, ?)
-                                    """, (image_id, gallery_db_id))
+                                    """, image_album_values)
                                 
-                                # Process tags
-                                for tag in metadata.get('tags', []):
-                                    cursor.execute("""
+                                # Batch process tags
+                                if metadata.get('tags'):
+                                    tag_values = [(tag['name'], tag['count']) for tag in metadata['tags']]
+                                    cursor.executemany("""
                                         INSERT OR IGNORE INTO tags (name, count)
                                         VALUES (?, ?)
-                                    """, (tag['name'], tag['count']))
+                                    """, tag_values)
                                     
-                                    cursor.execute("SELECT id FROM tags WHERE name = ?", (tag['name'],))
-                                    tag_db_id = cursor.fetchone()[0]
-                                    
+                                    # Get tag IDs in a single query
                                     cursor.execute("""
+                                        SELECT name, id FROM tags 
+                                        WHERE name IN ({})
+                                    """.format(','.join('?' * len(tag_values))), 
+                                    [v[0] for v in tag_values])
+                                    tag_ids = {row[0]: row[1] for row in cursor.fetchall()}
+                                    
+                                    # Batch insert image_tags
+                                    image_tag_values = [(image_id, tag_ids[tag['name']]) 
+                                                      for tag in metadata['tags']]
+                                    cursor.executemany("""
                                         INSERT INTO image_tags (image_id, tag_id)
                                         VALUES (?, ?)
-                                    """, (image_id, tag_db_id))
+                                    """, image_tag_values)
                                 
                                 processed_count += 1
                                 author = metadata.get('author', 'unknown')
