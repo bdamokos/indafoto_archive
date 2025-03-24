@@ -24,6 +24,8 @@ try:
     from io import BytesIO
     import psutil
     import tracemalloc
+    import ssl
+    import random
 except ImportError as e:
     print(f"Error importing required modules: {e}")
     print("Please install the required modules using the requirements.txt file:\n")
@@ -579,20 +581,47 @@ banned_authors_set = set()
 current_page = 0  # Track current page number
 
 def create_session(max_retries=3, pool_connections=4):
-    """Create a standardized session optimized for HTTP/1.1"""
+    """Create a standardized session optimized for HTTP/1.1 with TLS optimizations"""
     session = requests.Session()
     session.headers.update(HEADERS)
     session.cookies.update(COOKIES)
     
-    # Configure adapter for better performance with HTTP/1.1
-    # For HTTP/1.1, we need more connections since each one can only handle one request at a time
+    # Set session-level timeout
+    session.timeout = 30
+    
+    # Configure retry strategy
+    retry_strategy = requests.adapters.Retry(
+        total=max_retries,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504]
+    )
+    
+    # Create adapter with connection pooling
     adapter = requests.adapters.HTTPAdapter(
         pool_maxsize=pool_connections,
         pool_block=True,
-        max_retries=max_retries
+        max_retries=retry_strategy
     )
+    
+    # Mount the adapter for both HTTP and HTTPS
     session.mount('http://', adapter)
     session.mount('https://', adapter)
+    
+    # Configure TLS settings
+    if hasattr(adapter, 'init_poolmanager'):
+        adapter.init_poolmanager(
+            connections=pool_connections,
+            maxsize=pool_connections,
+            block=True,
+            ssl_version=ssl.PROTOCOL_TLSv1_2,
+            # Enable session reuse
+            ssl_context=ssl.create_default_context(
+                purpose=ssl.Purpose.SERVER_AUTH,
+                cafile=None,
+                capath=None,
+                cadata=None
+            )
+        )
     
     return session
 
@@ -607,11 +636,11 @@ def init_db():
         available_memory = psutil.virtual_memory().available
         total_memory = psutil.virtual_memory().total
         
-        # Calculate cache size (in KB) - use up to 15% of available memory, max 200MB
-        cache_kb = min(int(available_memory * 0.15 / 1024), 200000)
+        # Calculate cache size (in KB) - use up to 35% of available memory, max 500MB
+        cache_kb = min(int(available_memory * 0.35 / 1024), 500 * 1024 * 1024)
         
-        # Calculate mmap size (in bytes) - use up to 10% of available memory, max 500MB
-        mmap_bytes = min(int(available_memory * 0.10), 500 * 1024 * 1024)
+        # Calculate mmap size (in bytes) - use up to 35% of available memory, max 500MB
+        mmap_bytes = min(int(available_memory * 0.35), 500 * 1024 * 1024)
         
         logger.info(f"System memory: {total_memory/1024/1024/1024:.2f}GB total, {available_memory/1024/1024/1024:.2f}GB available")
         logger.info(f"SQLite memory allocation: {cache_kb/1024:.2f}MB cache, {mmap_bytes/1024/1024:.2f}MB mmap")
@@ -1732,7 +1761,7 @@ class ThreadPool:
             pass
 
 def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
-    """Process a list of images and save them to the database."""
+    """Process a list of images with improved connection handling."""
     global consecutive_failures, consecutive_successes, current_wait_time, current_workers
     
     author_image_counts = {}
@@ -1741,20 +1770,30 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
     skipped_count = 0
     banned_count = 0
     
-    # Create thread pools for different operations
-    metadata_pool = ThreadPool(max(current_workers*4, 12), "metadata")
-    download_pool = ThreadPool(current_workers, "download")
-    validation_pool = ThreadPool(current_workers, "validation")
-    
-    # Create session pool with more sessions for better parallelization
-    session_pool = queue.Queue(maxsize=current_workers * 4)
-    for _ in range(current_workers * 4):
-        session = create_session(max_retries=3)
+    # Create a session pool for better connection reuse
+    session_pool = queue.Queue(maxsize=current_workers * 2)
+    for _ in range(current_workers * 2):
+        session = create_session(max_retries=3, pool_connections=current_workers)
         session_pool.put(session)
     
+    def get_session():
+        """Get a session from the pool with timeout."""
+        try:
+            return session_pool.get(timeout=5)
+        except queue.Empty:
+            return create_session(max_retries=3, pool_connections=current_workers)
+    
+    def return_session(session):
+        """Return a session to the pool if it's healthy."""
+        try:
+            if session and not session_pool.full():
+                session_pool.put(session, timeout=1)
+        except queue.Full:
+            session.close()
+    
     def process_metadata(image_data):
-        """Process metadata for a single image."""
-        session = session_pool.get()
+        """Process metadata with connection pooling."""
+        session = get_session()
         try:
             metadata = extract_metadata(image_data['page_url'], session=session)
             if metadata:
@@ -1769,11 +1808,11 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
         except Exception as e:
             return ('error', ('metadata', image_data['page_url'], str(e)))
         finally:
-            session_pool.put(session)
+            return_session(session)
     
     def process_download(download_url, metadata):
-        """Download a single image."""
-        session = session_pool.get()
+        """Process download with connection pooling."""
+        session = get_session()
         try:
             result = download_image(download_url, metadata['author'], session=session)
             if result:
@@ -1783,10 +1822,10 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
         except Exception as e:
             return ('error', ('download', download_url, str(e)))
         finally:
-            session_pool.put(session)
+            return_session(session)
     
     def process_validation(filename, url, metadata):
-        """Validate and hash a single image."""
+        """Process validation with connection pooling."""
         try:
             file_hash = calculate_file_hash(filename)
             return ('success', (filename, file_hash, url, metadata))
@@ -1797,6 +1836,11 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
             except:
                 pass
             return ('error', ('validation', url, str(e)))
+    
+    # Create thread pools for parallel processing
+    metadata_pool = ThreadPool(current_workers, "metadata")
+    download_pool = ThreadPool(current_workers, "download")
+    validation_pool = ThreadPool(current_workers, "validation")
     
     try:
         # First pass: check for duplicates and prepare work queue
@@ -1848,7 +1892,8 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
         with tqdm(total=len(image_ids_to_process), desc="Processing images", colour='yellow') as pbar:
             # Add metadata tasks
             for image_data in image_ids_to_process:
-                metadata_pool.add_task(process_metadata, image_data)
+                if random.random() <= sample_rate:
+                    metadata_pool.add_task(process_metadata, image_data)
             
             # Process results and chain tasks
             while processed_count + failed_count + banned_count < len(image_ids_to_process):
@@ -1897,7 +1942,7 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
                         
                         if status == 'success':
                             filename, file_hash, url, metadata = data
-                            # Save to database (this part remains unchanged)
+                            # Save to database
                             try:
                                 # Insert image data
                                 cursor.execute("""
@@ -2055,6 +2100,14 @@ def process_image_list(image_data_list, conn, cursor, sample_rate=1.0):
             validation_pool.shutdown()
         except:
             pass
+        
+        # Clean up session pool
+        while not session_pool.empty():
+            try:
+                session = session_pool.get_nowait()
+                session.close()
+            except queue.Empty:
+                break
 
 def get_free_space_gb(path):
     """Return free space in GB for the given path."""
@@ -3047,6 +3100,19 @@ def run_benchmark(iterations=100):
     
     logger.info(f"Results saved to benchmark_{platform.system().lower()}.json")
     return results
+
+def validate_image(filename, url, metadata, session=None):
+    """Validate and hash a single image."""
+    try:
+        file_hash = calculate_file_hash(filename)
+        return ('success', (filename, file_hash, url, metadata))
+    except Exception as e:
+        try:
+            if os.path.exists(filename):
+                os.remove(filename)
+        except:
+            pass
+        return ('error', ('validation', url, str(e)))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Indafoto Crawler')
