@@ -6,49 +6,153 @@
 <div class="container mt-4">
     <h1>Browse Authors</h1>
     
-    <div class="card">
-        <div class="card-body">
-            <div class="row">
-                {% for author in authors %}
-                <div class="col-md-4 mb-3">
-                    <div class="d-flex justify-content-between align-items-center p-2 bg-light rounded">
-                        <a href="{{ url_for('author_gallery', author_name=author.name) }}" class="text-decoration-none">
-                            {{ author.name }}
-                            <small class="text-muted">({{ author.count }} images)</small>
-                        </a>
-                        <button onclick="toggleFavoriteAuthor('{{ author.name }}', this)" 
-                                class="favorite-star btn btn-link p-0"
-                                data-author="{{ author.name }}">
-                            <i class="far fa-star"></i>
-                        </button>
-                    </div>
-                </div>
-                {% endfor %}
+    <div class="row">
+        <div class="col-12">
+            <div class="table-responsive">
+                <table class="table table-striped">
+                    <thead>
+                        <tr>
+                            <th>Author</th>
+                            <th>Slug</th>
+                            <th>Images</th>
+                            <th>Registration Date</th>
+                            <th>Bio</th>
+                            <th>Website</th>
+                            <th>Tag Cloud</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for author in authors %}
+                        <tr>
+                            <td>
+                                <a href="{{ url_for('browse_images', author=author.name) }}">{{ author.name }}</a>
+                            </td>
+                            <td>
+                                {% if author.details and author.details.author_slug %}
+                                    <code>{{ author.details.author_slug }}</code>
+                                {% endif %}
+                            </td>
+                            <td>{{ author.count }}</td>
+                            <td>
+                                {% if author.details and author.details.registration_date %}
+                                    {{ author.details.registration_date }}
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if author.details and author.details.bio %}
+                                    <div class="bio-cell">
+                                        {{ author.details.bio }}
+                                    </div>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if author.details and author.details.website %}
+                                    <a href="{{ author.details.website }}" target="_blank" rel="noopener noreferrer">
+                                        {{ author.details.website }}
+                                    </a>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if author.details and author.details.tag_cloud %}
+                                    <div class="tag-cloud">
+                                        {% for tag in author.details.tag_cloud[:5] %}
+                                            <a href="{{ url_for('browse_images', tag=tag.name) }}" class="badge bg-secondary me-1">
+                                                {{ tag.name }}
+                                            </a>
+                                        {% endfor %}
+                                        {% if author.details.tag_cloud|length > 5 %}
+                                            <span class="badge bg-info">+{{ author.details.tag_cloud|length - 5 }} more</span>
+                                        {% endif %}
+                                    </div>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <button onclick="toggleFavoriteAuthor('{{ author.name }}', this)" 
+                                        class="favorite-star btn btn-link p-0"
+                                        data-author="{{ author.name }}">
+                                    <i class="far fa-star"></i>
+                                </button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
             </div>
         </div>
     </div>
 </div>
-{% endblock %}
 
-{% block scripts %}
+<style>
+.tag-cloud {
+    max-width: 300px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.tag-cloud .badge {
+    font-size: 0.8em;
+    text-decoration: none;
+}
+.bio-cell {
+    max-width: 300px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+</style>
+
 <script>
-    // Initialize favorite stars
-    document.addEventListener('DOMContentLoaded', async function() {
-        const stars = document.querySelectorAll('.favorite-star');
-        for (const star of stars) {
-            const authorName = star.dataset.author;
-            const isFavorite = await checkFavoriteStatus(authorName);
-            const icon = star.querySelector('i');
-            if (isFavorite) {
-                icon.classList.remove('far');
-                icon.classList.add('fas');
-                icon.style.color = '#ffc107';
-            } else {
-                icon.classList.remove('fas');
-                icon.classList.add('far');
-                icon.style.color = '#6c757d';
+function toggleFavoriteAuthor(authorName, button) {
+    const icon = button.querySelector('i');
+    const isFavorite = icon.classList.contains('fas');
+    
+    if (isFavorite) {
+        // Remove from favorites
+        fetch(`/api/favorite_authors/${encodeURIComponent(authorName)}`, {
+            method: 'DELETE'
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                icon.classList.replace('fas', 'far');
             }
-        }
-    });
+        });
+    } else {
+        // Add to favorites
+        fetch('/api/favorite_authors', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                author_name: authorName,
+                priority: 0
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                icon.classList.replace('far', 'fas');
+            }
+        });
+    }
+}
+
+// Initialize favorite stars
+document.addEventListener('DOMContentLoaded', function() {
+    fetch('/api/favorite_authors')
+        .then(response => response.json())
+        .then(data => {
+            const favoriteAuthors = new Set(data.authors.map(a => a.author_name));
+            document.querySelectorAll('.favorite-star').forEach(button => {
+                const authorName = button.dataset.author;
+                const icon = button.querySelector('i');
+                if (favoriteAuthors.has(authorName)) {
+                    icon.classList.replace('far', 'fas');
+                }
+            });
+        });
+});
 </script>
 {% endblock %} 

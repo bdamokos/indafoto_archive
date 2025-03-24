@@ -1061,18 +1061,63 @@ def update_favorite_author(author_name):
 
 @app.route('/authors')
 def browse_authors():
-    """View all authors with their image counts."""
+    """View all authors with their image counts and details."""
     conn = get_db()
     cursor = conn.cursor()
     
-    # Get all authors with their image counts
+    # Get all authors with their image counts and details
     cursor.execute("""
-        SELECT author as name, COUNT(*) as count 
-        FROM images 
-        GROUP BY author 
+        SELECT i.author as name, 
+               COUNT(*) as count,
+               ad.bio,
+               ad.website,
+               ad.registration_date,
+               ad.image_count as reported_count,
+               ad.album_count,
+               ad.tag_cloud,
+               ad.last_updated,
+               ad.author_slug
+        FROM images i
+        LEFT JOIN author_details ad ON i.author = ad.author
+        GROUP BY i.author
         ORDER BY count DESC
     """)
-    authors = cursor.fetchall()
+    
+    authors = []
+    for row in cursor.fetchall():
+        author_data = dict(row)
+        
+        # Parse tag cloud JSON if exists
+        if author_data.get('tag_cloud'):
+            import json
+            try:
+                tag_cloud = json.loads(author_data['tag_cloud'])
+            except:
+                tag_cloud = []
+        else:
+            tag_cloud = []
+            
+        # Create details object
+        details = {
+            'bio': author_data.get('bio'),
+            'website': author_data.get('website'),
+            'registration_date': author_data.get('registration_date'),
+            'reported_count': author_data.get('reported_count'),
+            'album_count': author_data.get('album_count'),
+            'tag_cloud': tag_cloud,
+            'last_updated': author_data.get('last_updated'),
+            'author_slug': author_data.get('author_slug')
+        }
+        
+        # Add details to author data
+        author_data['details'] = details
+        
+        # Remove the raw fields
+        for key in ['bio', 'website', 'registration_date', 'reported_count', 
+                   'album_count', 'tag_cloud', 'last_updated', 'author_slug']:
+            author_data.pop(key, None)
+            
+        authors.append(author_data)
     
     conn.close()
     
