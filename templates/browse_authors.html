@@ -56,14 +56,14 @@
                             <td>
                                 {% if author.details and author.details.tag_cloud %}
                                     <div class="tag-cloud">
-                                        {% for tag in author.details.tag_cloud[:5] %}
+                                        {% for tag in author.details.tag_cloud %}
                                             <a href="{{ url_for('browse_images', tag=tag.name) }}" class="badge bg-secondary me-1">
                                                 {{ tag.name }}
                                             </a>
                                         {% endfor %}
-                                        {% if author.details.tag_cloud|length > 5 %}
+                                        <!-- {% if author.details.tag_cloud|length > 5 %}
                                             <span class="badge bg-info">+{{ author.details.tag_cloud|length - 5 }} more</span>
-                                        {% endif %}
+                                        {% endif %} -->
                                     </div>
                                 {% endif %}
                             </td>
