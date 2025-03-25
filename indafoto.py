@@ -1528,8 +1528,28 @@ def download_image(image_url, author, session=None):
                     return None, None
                 
                 # Write the verified data directly to final location
-                with open(filename, 'wb') as f:
-                    f.write(buffer.getvalue())
+                try:
+                    with open(filename, 'wb') as f:
+                        f.write(buffer.getvalue())
+                except (OSError, IOError) as e:
+                    if 'Stale NFS file handle' in str(e):
+                        logger.error(f"Encountered stale NFS file handle: {filename}")
+                        logger.info("Running fix_stale_files.py to fix NFS issues...")
+                        
+                        # Run the fix script
+                        try:
+                            import subprocess
+                            subprocess.run(['./fix_stale_files.py'], check=True)
+                            logger.info("Successfully ran fix_stale_files.py")
+                        except subprocess.CalledProcessError as e:
+                            logger.error(f"Failed to run fix_stale_files.py: {e}")
+                            return None, None
+                        
+                        # Restart the script from the previous page
+                        logger.info("Restarting script from previous page...")
+                        restart_script(error_restart=True)
+                        return None, None
+                    raise
                 
                 # Return the filename and hash
                 return filename, sha256_hash.hexdigest()
