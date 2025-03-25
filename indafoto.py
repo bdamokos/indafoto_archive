@@ -2343,8 +2343,6 @@ def crawl_images(start_offset=0, retry_mode=False):
         pending_results = {}                       # Store results by page number
         completed_pages = set()                    # Set of completed page numbers
         page_metadata_progress = {}                # Track metadata progress by page
-        queued_next_pages = set()                  # Track pages already queued for processing
-        metadata_lock = threading.Lock()           # Lock for updating metadata progress
         
         # Define database operation types
         DB_CHECK_PAGE = 1         # Check if page is already completed
@@ -2593,30 +2591,20 @@ def crawl_images(start_offset=0, retry_mode=False):
         # Update metadata progress and potentially start the next page
         def update_metadata_progress(page_number, current, total):
             """Update progress for a page and possibly start next page processing"""
-            next_page = page_number + 1
+            progress = current / total if total > 0 else 0
+            page_metadata_progress[page_number] = progress
             
-            with metadata_lock:
-                # Update progress
-                progress = current / total if total > 0 else 0
-                page_metadata_progress[page_number] = progress
-                
-                # If we've processed 80% of the metadata for the current page, start the next page
-                if (progress >= 0.8 and 
-                    next_page not in active_page_threads and 
-                    next_page not in completed_pages and
-                    next_page not in queued_next_pages and
-                    next_page < TOTAL_PAGES):
-                    
-                    try:
-                        # Only start next page if not at capacity and not already queued
-                        if not page_queue.full():
-                            queued_next_pages.add(next_page)  # Mark as queued
-                            next_page_url = get_search_url(next_page)
-                            page_queue.put((next_page, next_page_url), block=False)
-                            logger.info(f"Queued page {next_page} after reaching 80% metadata on page {page_number}")
-                    except queue.Full:
-                        # Queue is full, we'll try again later
-                        logger.debug(f"Page queue full, waiting to queue page {next_page}")
+            # If we've processed 80% of the metadata for the current page, start the next page
+            if progress >= 0.8 and page_number + 1 not in active_page_threads and page_number + 1 not in completed_pages:
+                try:
+                    # Only start next page if not at capacity and not already queued
+                    if not page_queue.full() and page_number + 1 < TOTAL_PAGES:
+                        next_page_url = get_search_url(page_number + 1)
+                        page_queue.put((page_number + 1, next_page_url), block=False)
+                        logger.info(f"Queued page {page_number + 1} after reaching 80% metadata on page {page_number}")
+                except queue.Full:
+                    # Queue is full, we'll try again later
+                    logger.debug(f"Page queue full, waiting to queue page {page_number + 1}")
         
         # Queue the initial page to start processing
         initial_page = start_offset
@@ -2810,11 +2798,8 @@ def crawl_images(start_offset=0, retry_mode=False):
                         elif highest_completed < TOTAL_PAGES - 1:
                             # Queue the next page after the highest completed one
                             next_page = highest_completed + 1
-                            with metadata_lock:
-                                if next_page not in queued_next_pages:
-                                    queued_next_pages.add(next_page)
-                                    logger.info(f"Queueing next page {next_page} after completion")
-                                    page_queue.put((next_page, get_search_url(next_page)))
+                            logger.info(f"Queueing next page {next_page} after completion")
+                            page_queue.put((next_page, get_search_url(next_page)))
                     
                     # Short sleep to prevent busy waiting
                     time.sleep(0.5)
