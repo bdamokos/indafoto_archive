@@ -525,7 +525,7 @@ class ArchiveSubmitter:
             
         return results
 
-    def fetch_archive_ph_listings(self, domain="indafoto.hu", max_pages=10, author_pattern=None):
+    def fetch_archive_ph_listings(self, domain="indafoto.hu", max_pages=50, author_pattern=None):
         """
         Fetch and parse the archive.ph listings for a domain or specific author pattern.
         
