@@ -1,0 +1,16 @@
+{
+    "database_path": "indafoto.db",
+    "image_root": "/path/to/image/root",
+    "syncthing_api_key": "your-api-key",
+    "syncthing_host": "localhost",
+    "syncthing_port": 8384,
+    "remote_sources": [
+        {
+            "name": "remote1",
+            "folder_id": "remote1-folder-id",
+            "local_path": "/path/to/sync/folder",
+            "remote_db_path": "/path/to/remote/indafoto.db",
+            "remote_db_sync_interval": 3600  # seconds between database syncs
+        }
+    ]
+} 
