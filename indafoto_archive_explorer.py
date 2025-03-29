@@ -35,7 +35,7 @@ app = Flask(__name__)
 
 # Configuration
 DB_FILE = "indafoto.db"
-ITEMS_PER_PAGE = 24  # Number of items to show per page
+ITEMS_PER_PAGE = 144 # Number of items to show per page
 SITE_DELETION_DATE = date(2025, 4, 1)  # Site deletion date
 ARCHIVE_RATE_LIMIT = 5  # Seconds between archive submissions
 ARCHIVE_QUEUE_FILE = "archive_queue.json"
