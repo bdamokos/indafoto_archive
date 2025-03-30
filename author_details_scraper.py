@@ -388,15 +388,33 @@ def get_authors_to_process(conn):
     # 1. Have never been processed
     # 2. Have failed but haven't exceeded retry limit
     # 3. Haven't been updated in the last 24 hours
+    # 4. Are from the author_crawl table and haven't been processed yet
     cursor.execute("""
-        SELECT DISTINCT i.author, i.author_url
-        FROM images i
-        LEFT JOIN author_details ad ON i.author = ad.author
-        WHERE ad.author IS NULL  -- Never processed
-           OR (ad.error IS NOT NULL AND ad.retry_count < ?)  -- Failed but can retry
-           OR (ad.last_updated < datetime('now', '-1 day'))  -- Old data
-        GROUP BY i.author
-        ORDER BY ad.retry_count ASC, ad.last_updated ASC NULLS FIRST
+        WITH author_status AS (
+            SELECT 
+                i.author,
+                i.author_url,
+                ad.retry_count,
+                ad.last_updated,
+                ad.error
+            FROM images i
+            LEFT JOIN author_details ad ON i.author = ad.author
+            UNION
+            SELECT 
+                ac.author,
+                ac.author_url,
+                ad.retry_count,
+                ad.last_updated,
+                ad.error
+            FROM author_crawl ac
+            LEFT JOIN author_details ad ON ac.author = ad.author
+        )
+        SELECT DISTINCT author, author_url
+        FROM author_status
+        WHERE retry_count IS NULL  -- Never processed
+           OR (error IS NOT NULL AND retry_count < ?)  -- Failed but can retry
+           OR (last_updated < datetime('now', '-1 day'))  -- Old data
+        ORDER BY COALESCE(retry_count, 0) ASC, COALESCE(last_updated, '1970-01-01') ASC
         LIMIT 100  -- Process in batches
     """, (MAX_RETRIES,))
     
