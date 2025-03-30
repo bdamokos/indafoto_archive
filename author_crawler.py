@@ -28,7 +28,7 @@ DB_FILE = "indafoto.db"
 BASE_TIMEOUT = 30
 MAX_RETRIES = 3
 BASE_RATE_LIMIT = 2  # Base delay between requests in seconds
-MAX_WORKERS = 10  # Maximum number of concurrent workers
+MAX_WORKERS = 3  # Maximum number of concurrent workers
 START_PAGE = 7427
 END_PAGE = 14267
 
@@ -127,7 +127,7 @@ def extract_authors_from_page(url, session=None):
                     'author_url': href
                 })
         
-        logger.info(f"Found {len(authors)} authors on page {url}")
+        # logger.info(f"Found {len(authors)} authors on page {url}")
         return authors
         
     except requests.exceptions.RequestException as e:
@@ -245,7 +245,8 @@ def crawler_loop(start_page=START_PAGE, end_page=END_PAGE):
                 try:
                     page_number, success = result_queue.get_nowait()
                     if success:
-                        logger.info(f"Successfully processed page {page_number}")
+                        pass
+                        # logger.info(f"Successfully processed page {page_number}")
                     else:
                         logger.warning(f"Failed to process page {page_number}")
                 except queue.Empty:
