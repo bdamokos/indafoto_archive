@@ -76,7 +76,18 @@ def init_db():
         found_date TEXT,
         processed BOOLEAN DEFAULT 0,
         error TEXT,
-        retry_count INTEGER DEFAULT 0
+        retry_count INTEGER DEFAULT 0,
+        UNIQUE(page_number, author)  -- Add unique constraint for page_number + author combination
+    )
+    """)
+    
+    # Clean up any duplicate entries
+    cursor.execute("""
+    DELETE FROM author_crawl 
+    WHERE id NOT IN (
+        SELECT MIN(id)
+        FROM author_crawl
+        GROUP BY page_number, author
     )
     """)
     
@@ -194,26 +205,32 @@ def process_page(page_number, page_url, db_file):
     finally:
         conn.close()
 
-def get_pages_to_process(db_file):
+def get_pages_to_process(db_file, start_page, end_page):
     """Get list of pages that need processing."""
     # Create a new connection for this thread
-    conn = sqlite3.connect(db_file)
+    conn = sqlite3.connect(db_file, timeout=30)  # Add timeout
     cursor = conn.cursor()
     
     try:
         # Get pages that:
         # 1. Have never been processed
         # 2. Have failed but haven't exceeded retry limit
+        # 3. Are within the specified page range
         cursor.execute("""
             SELECT DISTINCT page_number
             FROM author_crawl
-            WHERE processed = 0
-               OR (error IS NOT NULL AND retry_count < ?)
+            WHERE (processed = 0 OR (error IS NOT NULL AND retry_count < ?))
+              AND page_number BETWEEN ? AND ?
             ORDER BY page_number
             LIMIT 100  -- Process in batches
-        """, (MAX_RETRIES,))
+        """, (MAX_RETRIES, start_page, end_page))
         
-        return [row[0] for row in cursor.fetchall()]
+        pages = [row[0] for row in cursor.fetchall()]
+        logger.info(f"Found {len(pages)} pages to process within range {start_page}-{end_page}")
+        return pages
+    except sqlite3.OperationalError as e:
+        logger.error(f"Database error while getting pages to process: {e}")
+        return []
     finally:
         conn.close()
 
@@ -254,20 +271,32 @@ def crawler_loop(start_page=START_PAGE, end_page=END_PAGE):
                     # Ignore task_done() errors - they happen when the queue is empty
                     pass
     
-    while True:
+    current_page = start_page
+    while current_page <= end_page:
         try:
             # Get pages to process
-            pages = get_pages_to_process(DB_FILE)
+            pages = get_pages_to_process(DB_FILE, start_page, end_page)
             
             if not pages:
-                # If no pages to process, check if we've reached the end
-                if start_page >= end_page:
+                # If no pages to process, add next batch of pages within the range
+                batch_size = min(100, end_page - current_page + 1)
+                if batch_size <= 0:
                     logger.info("Reached end page, stopping crawler")
                     break
-                # Add next batch of pages
-                for page in range(start_page, min(start_page + 100, end_page + 1)):
+                    
+                for page in range(current_page, current_page + batch_size):
+                    if page > end_page:
+                        break
                     page_queue.put(page)
-                start_page += 100
+                current_page += batch_size
+                logger.info(f"Added batch of pages starting from {current_page - batch_size} (within range {start_page}-{end_page})")
+            else:
+                # Process existing pages
+                for page in pages:
+                    if page > end_page:
+                        break
+                    page_queue.put(page)
+                logger.info(f"Processing {len(pages)} existing pages within range {start_page}-{end_page}")
             
             # Start worker threads
             while len(active_threads) < MAX_WORKERS and not page_queue.empty():
