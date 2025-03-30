@@ -12,7 +12,7 @@ from urllib.parse import urljoin
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('author_details_scraper.log'),
