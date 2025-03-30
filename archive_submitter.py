@@ -860,9 +860,15 @@ class ArchiveSubmitter:
     def process_pending_authors(self):
         """Find and submit author pages that haven't been archived."""
         try:
-            # Get all unique author URLs from images
+            # Get all unique author URLs from both images and author_crawl tables
             self.cursor.execute("""
-                SELECT DISTINCT author_url FROM images
+                SELECT DISTINCT author_url 
+                FROM (
+                    SELECT author_url FROM images
+                    UNION
+                    SELECT author_url FROM author_crawl
+                    WHERE author_url IS NOT NULL
+                )
                 WHERE author_url NOT IN (
                     SELECT url FROM archive_submissions
                 )
