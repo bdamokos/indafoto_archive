@@ -172,7 +172,7 @@ def process_page(page_number, page_url, db_file):
                 ))
             
             conn.commit()
-            logger.info(f"Successfully processed page {page_number} with {len(authors)} authors")
+            logger.info(f"Successfully processed page {page_number} with {len(set(author_info['author'] for author_info in authors))} unique authors.")
             return True
             
         else:
