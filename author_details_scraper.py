@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 DB_FILE = "indafoto.db"
-CHECK_INTERVAL = 15 * 60  # 15 minutes in seconds
+CHECK_INTERVAL =  60  # 1 minutes in seconds
 MAX_RETRIES = 3
 
 # Headers and cookies required for authentication
