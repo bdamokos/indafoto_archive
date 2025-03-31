@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 DB_FILE = "indafoto.db"
 BASE_TIMEOUT = 30
 MAX_RETRIES = 3
-BASE_RATE_LIMIT = 2  # Base delay between requests in seconds
-MAX_WORKERS = 3  # Maximum number of concurrent workers
+BASE_RATE_LIMIT = 1  # Base delay between requests in seconds
+MAX_WORKERS = 10  # Maximum number of concurrent workers
 START_PAGE = 7427
 END_PAGE = 14267
 
