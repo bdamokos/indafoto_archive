@@ -438,7 +438,7 @@ def scraper_loop():
                         continue
                         
                     process_author(conn, author, author_url)
-                    time.sleep(5)  # Small delay between requests
+                    time.sleep(0.5)  # Small delay between requests
                     
             else:
                 logger.info("No authors to process at this time")
