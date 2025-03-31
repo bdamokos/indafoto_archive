@@ -387,8 +387,7 @@ def get_authors_to_process(conn):
     # Get authors that:
     # 1. Have never been processed
     # 2. Have failed but haven't exceeded retry limit
-    # 3. Haven't been updated in the last 24 hours
-    # 4. Are from the author_crawl table and haven't been processed yet
+    # 3. Have errors in their data
     cursor.execute("""
         WITH author_status AS (
             SELECT 
@@ -413,7 +412,7 @@ def get_authors_to_process(conn):
         FROM author_status
         WHERE retry_count IS NULL  -- Never processed
            OR (error IS NOT NULL AND retry_count < ?)  -- Failed but can retry
-           OR (last_updated < datetime('now', '-1 day'))  -- Old data
+           OR error IS NOT NULL  -- Have errors in their data
         ORDER BY COALESCE(retry_count, 0) ASC, COALESCE(last_updated, '1970-01-01') ASC
         LIMIT 100  -- Process in batches
     """, (MAX_RETRIES,))
