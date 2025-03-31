@@ -40,7 +40,7 @@ def redownload_missing_images():
                (SELECT COUNT(*) FROM archive_submissions a WHERE a.url = i.page_url AND a.status = 'success') as is_archived
         FROM images i
         WHERE i.local_path IS NULL
-        ORDER BY i.id
+        ORDER BY i.id DESC
     """)
     
     images = cursor.fetchall()
