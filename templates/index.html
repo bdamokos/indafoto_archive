@@ -64,6 +64,11 @@
                         <h5 class="card-title mb-0">Most Active Authors</h5>
                         <a href="{{ url_for('browse_authors') }}" class="btn btn-primary btn-sm">Browse All Authors</a>
                     </div>
+                    <p class="text-muted mb-2">
+                        Total authors: {{ stats.author_stats.total_authors }} 
+                        ({{ stats.author_stats.authors_with_images }} with images, 
+                        {{ stats.author_stats.authors_without_images }} without)
+                    </p>
                     <ul class="list-group list-group-flush">
                         {% for author in stats.all_authors[:5] %}
                         <li class="list-group-item d-flex justify-content-between align-items-center">

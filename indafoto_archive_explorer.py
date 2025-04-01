@@ -190,11 +190,22 @@ def index():
         total_albums = db.execute('SELECT COUNT(*) as count FROM albums').fetchone()['count']
         total_tags = db.execute('SELECT COUNT(*) as count FROM tags').fetchone()['count']
 
+        # Get author statistics
+        author_stats = db.execute('''
+            SELECT 
+                COUNT(DISTINCT ad.author) as total_authors,
+                COUNT(DISTINCT CASE WHEN i.id IS NOT NULL THEN ad.author END) as authors_with_images,
+                COUNT(DISTINCT CASE WHEN i.id IS NULL THEN ad.author END) as authors_without_images
+            FROM author_details ad
+            LEFT JOIN images i ON ad.author = i.author
+        ''').fetchone()
+
         # Get all authors with their image counts
         all_authors = db.execute('''
-            SELECT author as name, COUNT(*) as count 
-            FROM images 
-            GROUP BY author 
+            SELECT ad.author as name, COUNT(i.id) as count 
+            FROM author_details ad
+            LEFT JOIN images i ON ad.author = i.author
+            GROUP BY ad.author 
             ORDER BY count DESC
         ''').fetchall()
 
@@ -214,6 +225,7 @@ def index():
             'total_collections': total_collections,
             'total_albums': total_albums,
             'total_tags': total_tags,
+            'author_stats': author_stats,
             'all_authors': all_authors,
             'top_tags': top_tags
         }
@@ -1067,8 +1079,8 @@ def browse_authors():
     
     # Get all authors with their image counts and details
     cursor.execute("""
-        SELECT i.author as name, 
-               COUNT(*) as count,
+        SELECT ad.author as name, 
+               COUNT(i.id) as count,
                ad.bio,
                ad.website,
                ad.registration_date,
@@ -1077,9 +1089,9 @@ def browse_authors():
                ad.tag_cloud,
                ad.last_updated,
                ad.author_slug
-        FROM images i
-        LEFT JOIN author_details ad ON i.author = ad.author
-        GROUP BY i.author
+        FROM author_details ad
+        LEFT JOIN images i ON ad.author = i.author
+        GROUP BY ad.author
         ORDER BY count DESC
     """)
     
