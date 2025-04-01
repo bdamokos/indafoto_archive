@@ -398,6 +398,7 @@ def get_authors_to_process(conn):
                 ad.error
             FROM images i
             LEFT JOIN author_details ad ON i.author = ad.author
+            WHERE i.author_url IS NOT NULL  -- Only include authors with valid URLs
             UNION
             SELECT 
                 ac.author,
@@ -407,6 +408,7 @@ def get_authors_to_process(conn):
                 ad.error
             FROM author_crawl ac
             LEFT JOIN author_details ad ON ac.author = ad.author
+            WHERE ac.author_url IS NOT NULL  -- Only include authors with valid URLs
         )
         SELECT DISTINCT author, author_url
         FROM author_status
