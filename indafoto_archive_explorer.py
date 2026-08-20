@@ -591,7 +591,7 @@ def serve_image(image_path):
 
         full_path = os.path.realpath(os.path.join(base_path, relative_path))
         if not full_path.startswith(base_path + os.path.sep):
-            abort(404)
+            raise FileNotFoundError("Image path is outside the archive directory")
 
         # Check if file exists and is a file (not a directory)
         if not os.path.isfile(full_path):
