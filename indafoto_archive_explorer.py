@@ -590,7 +590,7 @@ def serve_image(image_path):
             relative_path = Path(*path_parts[1:])
 
         full_path = os.path.realpath(os.path.join(base_path, relative_path))
-        if full_path != base_path and not full_path.startswith(base_path + os.path.sep):
+        if not full_path.startswith(base_path + os.path.sep):
             abort(404)
 
         # Check if file exists and is a file (not a directory)
