@@ -1175,7 +1175,7 @@ def add_banned_author():
             return jsonify({'success': False, 'error': 'Author is already banned'})
     except Exception:
         logger.exception("Error adding banned author")
-        return internal_error_response(include_success=True)
+        return internal_error_response(include_success=True, status_code=500)
     finally:
         conn.close()
 
@@ -1191,7 +1191,7 @@ def remove_banned_author(author):
             return jsonify({'success': False, 'error': 'Author is not banned'})
     except Exception:
         logger.exception("Error removing banned author")
-        return internal_error_response(include_success=True)
+        return internal_error_response(include_success=True, status_code=500)
     finally:
         conn.close()
 
@@ -1207,7 +1207,7 @@ def cleanup_author_content(author):
             return jsonify({'success': False, 'error': 'Failed to clean up content'})
     except Exception:
         logger.exception("Error cleaning up banned author content")
-        return internal_error_response(include_success=True)
+        return internal_error_response(include_success=True, status_code=500)
     finally:
         conn.close()
 

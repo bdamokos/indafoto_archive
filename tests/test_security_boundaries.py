@@ -112,7 +112,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                     explorer, function_name, side_effect=RuntimeError(SENSITIVE_ERROR)
                 ):
                     response = getattr(self.client, method)(route, json=payload)
-                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.status_code, 500)
                     self.assertEqual(
                         response.get_json(),
                         {"success": False, "error": explorer.INTERNAL_ERROR_MESSAGE},
