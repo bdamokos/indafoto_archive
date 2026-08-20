@@ -52,7 +52,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                         self.assertEqual(response.data, b"local archive image")
                         response.close()
 
-    def test_archive_path_rejects_traversal_absolute_paths_and_escaping_symlinks(self):
+    def test_image_route_rejects_traversal_absolute_paths_and_escaping_symlinks(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             archive_dir = root / "archive"
@@ -72,8 +72,8 @@ class SecurityBoundaryTests(unittest.TestCase):
             with patch.dict("os.environ", {"ARCHIVE_PATH": str(archive_dir)}):
                 for image_path in malicious_paths:
                     with self.subTest(image_path=image_path):
-                        with self.assertRaises(NotFound):
-                            explorer.resolve_archive_image_path(image_path)
+                        with explorer.app.test_request_context(), self.assertRaises(NotFound):
+                            explorer.serve_image(image_path)
 
                 response = self.client.get("/serve_image/%252e%252e%252fprivate.jpg")
                 self.assertEqual(response.status_code, 404)

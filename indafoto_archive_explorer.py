@@ -65,32 +65,6 @@ def internal_error_response(*, include_success=False, status_code=None):
     return response, status_code
 
 
-def resolve_archive_image_path(image_path):
-    """Resolve a requested image path inside the configured archive directory."""
-    base_path = os.path.realpath(
-        os.environ.get('ARCHIVE_PATH', Path.cwd() / 'indafoto_archive')
-    )
-    decoded_path = unquote(image_path)
-
-    # Treat both URL and platform separators as path boundaries. This keeps
-    # archive URLs portable between the Windows and POSIX versions of the app.
-    relative_path = Path(
-        decoded_path.replace('\\', os.path.sep).replace('/', os.path.sep)
-    )
-    path_parts = relative_path.parts
-    if path_parts and path_parts[0] == 'indafoto_archive':
-        relative_path = Path(*path_parts[1:])
-
-    try:
-        candidate = os.path.realpath(os.path.join(base_path, relative_path))
-        if candidate != base_path and not candidate.startswith(base_path + os.path.sep):
-            abort(404)
-    except (OSError, ValueError):
-        abort(404)
-
-    return Path(candidate)
-
-
 
 
 
@@ -601,10 +575,26 @@ def get_image_note(image_id):
 def serve_image(image_path):
     """Serve image files with streaming and caching enabled."""
     try:
-        full_path = resolve_archive_image_path(image_path)
-            
+        base_path = os.path.realpath(
+            os.environ.get('ARCHIVE_PATH', Path.cwd() / 'indafoto_archive')
+        )
+        decoded_path = unquote(image_path)
+
+        # Treat both URL and platform separators as path boundaries. This keeps
+        # archive URLs portable between the Windows and POSIX versions of the app.
+        relative_path = Path(
+            decoded_path.replace('\\', os.path.sep).replace('/', os.path.sep)
+        )
+        path_parts = relative_path.parts
+        if path_parts and path_parts[0] == 'indafoto_archive':
+            relative_path = Path(*path_parts[1:])
+
+        full_path = os.path.realpath(os.path.join(base_path, relative_path))
+        if full_path != base_path and not full_path.startswith(base_path + os.path.sep):
+            abort(404)
+
         # Check if file exists and is a file (not a directory)
-        if not full_path.is_file():
+        if not os.path.isfile(full_path):
             logger.error(f"Image file not found: {full_path}")
             abort(404)
             
