@@ -67,9 +67,9 @@ def internal_error_response(*, include_success=False, status_code=None):
 
 def resolve_archive_image_path(image_path):
     """Resolve a requested image path inside the configured archive directory."""
-    base_path = Path(
+    base_path = os.path.realpath(
         os.environ.get('ARCHIVE_PATH', Path.cwd() / 'indafoto_archive')
-    ).resolve()
+    )
     decoded_path = unquote(image_path)
 
     # Treat both URL and platform separators as path boundaries. This keeps
@@ -82,13 +82,13 @@ def resolve_archive_image_path(image_path):
         relative_path = Path(*path_parts[1:])
 
     try:
-        candidate = (base_path / relative_path).resolve()
-        if os.path.commonpath((str(base_path), str(candidate))) != str(base_path):
+        candidate = os.path.realpath(os.path.join(base_path, relative_path))
+        if candidate != base_path and not candidate.startswith(base_path + os.path.sep):
             abort(404)
     except (OSError, ValueError):
         abort(404)
 
-    return candidate
+    return Path(candidate)
 
 
 
