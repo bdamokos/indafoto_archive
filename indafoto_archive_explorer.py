@@ -39,6 +39,7 @@ ITEMS_PER_PAGE = 144 # Number of items to show per page
 SITE_DELETION_DATE = date(2025, 4, 1)  # Site deletion date
 ARCHIVE_RATE_LIMIT = 5  # Seconds between archive submissions
 ARCHIVE_QUEUE_FILE = "archive_queue.json"
+INTERNAL_ERROR_MESSAGE = "An internal error has occurred!"
 
 # Headers for archive requests
 HEADERS = {
@@ -50,6 +51,18 @@ HEADERS = {
 # Global archive queue and submitter
 archive_queue = queue.Queue()
 archive_submitter = None
+
+
+def internal_error_response(*, include_success=False, status_code=None):
+    """Return an API error without exposing server-side exception details."""
+    payload = {'error': INTERNAL_ERROR_MESSAGE}
+    if include_success:
+        payload['success'] = False
+
+    response = jsonify(payload)
+    if status_code is None:
+        return response
+    return response, status_code
 
 
 
@@ -482,9 +495,9 @@ def mark_image():
         
         conn.commit()
         return jsonify({'success': True})
-    except Exception as e:
-        logger.error(f"Error in mark_image: {e}")
-        return jsonify({'error': str(e)}), 500
+    except Exception:
+        logger.exception("Error in mark_image")
+        return internal_error_response(status_code=500)
     finally:
         conn.close()
 
@@ -525,9 +538,9 @@ def manage_image_note():
         
         conn.commit()
         return jsonify({'success': True})
-    except Exception as e:
-        logger.error(f"Error in manage_image_note: {e}")
-        return jsonify({'error': 'An internal error has occurred!'}), 500
+    except Exception:
+        logger.exception("Error in manage_image_note")
+        return internal_error_response(status_code=500)
     finally:
         conn.close()
 
@@ -552,9 +565,9 @@ def get_image_note(image_id):
                 'updated_date': result['updated_date']
             })
         return jsonify({'note': None})
-    except Exception as e:
-        logger.error(f"Error in get_image_note: {e}")
-        return jsonify({'error': 'An internal error has occurred!'}), 500
+    except Exception:
+        logger.exception("Error in get_image_note")
+        return internal_error_response(status_code=500)
     finally:
         conn.close()
 
@@ -562,34 +575,24 @@ def get_image_note(image_id):
 def serve_image(image_path):
     """Serve image files with streaming and caching enabled."""
     try:
-        # Get the base path for images (indafoto_archive directory)
-        base_path = os.path.abspath(os.path.join(os.getcwd(), 'indafoto_archive'))
-        
-        # URL decode the path first
+        base_path = os.path.realpath(
+            os.environ.get('ARCHIVE_PATH', Path.cwd() / 'indafoto_archive')
+        )
         decoded_path = unquote(image_path)
-        
-        # Convert URL path separators to OS-specific path separators
-        decoded_path = decoded_path.replace('/', os.path.sep)
-        
-        # Normalize the path to prevent path traversal
-        normalized_path = os.path.normpath(decoded_path)
-        
-        # Validate the path structure (using os.path.sep for platform independence)
-        if '..' in normalized_path or normalized_path.startswith(os.path.sep):
-            logger.error(f"Invalid path structure detected: {normalized_path}")
+
+        # Treat both URL and platform separators as path boundaries. This keeps
+        # archive URLs portable between the Windows and POSIX versions of the app.
+        relative_path = Path(
+            decoded_path.replace('\\', os.path.sep).replace('/', os.path.sep)
+        )
+        path_parts = relative_path.parts
+        if path_parts and path_parts[0] == 'indafoto_archive':
+            relative_path = Path(*path_parts[1:])
+
+        full_path = os.path.realpath(os.path.join(base_path, relative_path))
+        if full_path != base_path and not full_path.startswith(base_path + os.path.sep):
             abort(404)
-            
-        # Remove indafoto_archive prefix if it exists (using os.path.sep)
-        indafoto_prefix = f"indafoto_archive{os.path.sep}"
-        if normalized_path.startswith(indafoto_prefix):
-            normalized_path = normalized_path[len(indafoto_prefix):]
-            
-        # Construct the full path and ensure it's within the base directory
-        full_path = os.path.join(base_path, normalized_path)
-        if not os.path.abspath(full_path).startswith(base_path):
-            logger.error(f"Path traversal attempt detected: {full_path}")
-            abort(404)
-            
+
         # Check if file exists and is a file (not a directory)
         if not os.path.isfile(full_path):
             logger.error(f"Image file not found: {full_path}")
@@ -603,8 +606,8 @@ def serve_image(image_path):
             etag=True  # Enable ETag support
         )
         
-    except Exception as e:
-        logger.error(f"Error serving image {image_path}: {e}")
+    except Exception:
+        logger.exception("Error serving image")
         abort(404)
 
 @app.route('/static/<path:filename>')
@@ -978,9 +981,9 @@ def get_favorite_authors():
         return jsonify({
             'authors': [dict(author) for author in authors]
         })
-    except Exception as e:
-        logger.error(f"Error getting favorite authors: {e}")
-        return jsonify({'error': str(e)}), 500
+    except Exception:
+        logger.exception("Error getting favorite authors")
+        return internal_error_response(status_code=500)
     finally:
         conn.close()
 
@@ -1014,9 +1017,9 @@ def add_favorite_author():
         
         conn.commit()
         return jsonify({'success': True})
-    except Exception as e:
-        logger.error(f"Error adding favorite author: {e}")
-        return jsonify({'error': str(e)}), 500
+    except Exception:
+        logger.exception("Error adding favorite author")
+        return internal_error_response(status_code=500)
     finally:
         conn.close()
 
@@ -1034,9 +1037,9 @@ def remove_favorite_author(author_name):
             return jsonify({'error': 'Author not found in favorites'}), 404
             
         return jsonify({'success': True})
-    except Exception as e:
-        logger.error(f"Error removing favorite author: {e}")
-        return jsonify({'error': str(e)}), 500
+    except Exception:
+        logger.exception("Error removing favorite author")
+        return internal_error_response(status_code=500)
     finally:
         conn.close()
 
@@ -1065,9 +1068,9 @@ def update_favorite_author(author_name):
             return jsonify({'error': 'Author not found in favorites'}), 404
             
         return jsonify({'success': True})
-    except Exception as e:
-        logger.error(f"Error updating favorite author: {e}")
-        return jsonify({'error': str(e)}), 500
+    except Exception:
+        logger.exception("Error updating favorite author")
+        return internal_error_response(status_code=500)
     finally:
         conn.close()
 
@@ -1170,8 +1173,9 @@ def add_banned_author():
             return jsonify({'success': True})
         else:
             return jsonify({'success': False, 'error': 'Author is already banned'})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+    except Exception:
+        logger.exception("Error adding banned author")
+        return internal_error_response(include_success=True, status_code=500)
     finally:
         conn.close()
 
@@ -1185,8 +1189,9 @@ def remove_banned_author(author):
             return jsonify({'success': True})
         else:
             return jsonify({'success': False, 'error': 'Author is not banned'})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+    except Exception:
+        logger.exception("Error removing banned author")
+        return internal_error_response(include_success=True, status_code=500)
     finally:
         conn.close()
 
@@ -1200,8 +1205,9 @@ def cleanup_author_content(author):
             return jsonify({'success': True})
         else:
             return jsonify({'success': False, 'error': 'Failed to clean up content'})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+    except Exception:
+        logger.exception("Error cleaning up banned author content")
+        return internal_error_response(include_success=True, status_code=500)
     finally:
         conn.close()
 
